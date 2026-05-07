@@ -309,15 +309,21 @@ int SftpFindFirstFileW(pConnectSettings cs, LPCWSTR remotedir, LPVOID* davdatapt
     if (!ReconnectSFTPChannelIfNeeded(cs))
         return SFTP_FAILED;
 
+    SFTP_LOG("FIND", "SftpFindFirstFileW openDir loop start dir='%s'", dirStr.c_str());
     cs->findstarttime = get_sys_ticks();
     SYSTICKS aborttime = -1;
     int retrycount = 3;
+    int loopIter = 0;
     std::unique_ptr<ISftpHandle> dirhandle;
 
     do {
+        ++loopIter;
         dirhandle = cs->sftpsession->openDir(dirStr.c_str());
-        if (dirhandle)
+        if (dirhandle) {
+            SFTP_LOG("FIND", "SftpFindFirstFileW openDir OK after %d iters elapsed=%ums",
+                     loopIter, (unsigned)get_ticks_between(cs->findstarttime));
             break;
+        }
 
         int err = cs->session->lastErrno();
         if (err != LIBSSH2_ERROR_EAGAIN) {
@@ -341,9 +347,15 @@ int SftpFindFirstFileW(pConnectSettings cs, LPCWSTR remotedir, LPVOID* davdatapt
             if (ProgressProc(PluginNumber, dirStr.c_str(), "temp", (delta / kSftpProgressDivMs) % 100))
                 aborttime = get_sys_ticks() + kSftpAbortGraceMs;
         }
+        // Periodic progress log so we see whether the loop is actually spinning
+        // (and where it gets stuck if the host process hard-terminates us).
+        if ((loopIter % 20) == 0)
+            SFTP_LOG("FIND", "  openDir loop iter=%d elapsed=%dms retrycount=%d",
+                     loopIter, delta, retrycount);
         delta = get_ticks_between(aborttime);
         if (aborttime != -1 && delta > 0) {
             cs->neednewchannel = true;
+            SFTP_LOG("FIND", "SftpFindFirstFileW openDir aborted by user/timeout iter=%d", loopIter);
             break;
         }
     } while (!dirhandle);

@@ -377,6 +377,10 @@ function Build-Libssh2 {
     #   ENABLE_ZLIB_COMPRESSION=OFF         -> zlib not available, plugin doesn't need it
     #   OPENSSL_USE_STATIC_LIBS=TRUE        -> link our static libcrypto, not a system DLL
     #   CMAKE_MSVC_RUNTIME_LIBRARY=Multi... -> /MT to match the plugin
+    # /Z7 embeds debug info into each .obj (and thus into the resulting .lib).
+    # When the plugin links libssh2_*.lib, those symbols flow into sftpplug.pdb,
+    # so DbgHelp resolves stack frames that fall inside libssh2 code by name
+    # instead of showing "nearest_export + 0xNNNNN" offsets.
     $cmakeArgs = @(
         '-S', $libssh2Src
         '-B', $BuildDir
@@ -389,6 +393,7 @@ function Build-Libssh2 {
         # files leak /MD CRT imports (LNK2001 __imp_difftime64 / __imp_rewind).
         '-DCMAKE_POLICY_DEFAULT_CMP0091=NEW'
         '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded'
+        '-DCMAKE_C_FLAGS_RELEASE=/MT /O2 /Ob2 /DNDEBUG /Z7'
         '-DCRYPTO_BACKEND=OpenSSL'
         '-DBUILD_SHARED_LIBS=OFF'
         '-DBUILD_EXAMPLES=OFF'
@@ -445,8 +450,14 @@ if (-not (Test-Path $libDestDir))     { New-Item -ItemType Directory -Path $libD
 if (-not (Test-Path $includeDestDir)) { New-Item -ItemType Directory -Path $includeDestDir -Force | Out-Null }
 
 # OpenSSL libcrypto -> src/lib/libcrypto_<arch>.lib
+# Also copy ossl_static.pdb so the plugin linker can pull OpenSSL debug
+# symbols into sftpplug.pdb (used by DbgHelp at crash time).
 if (-not $SkipOpenSSL) {
     Copy-IfDifferent (Join-Path $opensslOutX64 'lib\libcrypto.lib') (Join-Path $libDestDir 'libcrypto_x64.lib')
+    $opensslPdbX64 = Join-Path $opensslOutX64 'lib\ossl_static.pdb'
+    if (Test-Path $opensslPdbX64) {
+        Copy-IfDifferent $opensslPdbX64 (Join-Path $libDestDir 'ossl_static.pdb')
+    }
     if (-not $X64Only) {
         Copy-IfDifferent (Join-Path $opensslOutX86 'lib\libcrypto.lib') (Join-Path $libDestDir 'libcrypto_x86.lib')
     }

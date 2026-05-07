@@ -3033,8 +3033,22 @@ pConnectSettings SftpConnectToServer(LPCSTR DisplayName, LPCSTR inifilename, LPC
             LogProc(PluginNumber, MSGTYPE_CONNECT, connbuf.data());
 
             // Move the connected settings to the heap ? unique_ptrs transfer ownership.
+            // Critical: SftpConnect() called createSession() with the LOCAL
+            // ConnectSettings address as the libssh2 session's `abstract`
+            // pointer. Our transport_send/recv_cb dereference (*abstract) to
+            // reach cs->transport_stream. After the move, the stack address
+            // becomes invalid, so we MUST redirect the session's abstract to
+            // the heap-allocated copy or the next callback invocation reads
+            // dangling stack memory and crashes (NULL deref via the
+            // transport_stream unique_ptr that the stale memory now contains).
+            // Direct connections do not install custom send/recv callbacks
+            // and so survived this bug for years; ProxyJump installs them and
+            // hits the dangling pointer on the first SFTP listing call.
             try {
-                return new tConnectSettings(std::move(ConnectSettings));
+                auto* heap_cs = new tConnectSettings(std::move(ConnectSettings));
+                if (heap_cs->session)
+                    *heap_cs->session->abstractPtr() = heap_cs;
+                return heap_cs;
             } catch (const std::bad_alloc&) {
                 if (ConnectSettings.feedback) {
                     ConnectSettings.feedback->ShowError(LngStrU8(IDS_ERR_OOM_CONN_SETTINGS, "Out of memory while creating connection settings."));

@@ -549,6 +549,13 @@ int SftpConnect(pConnectSettings ConnectSettings)
         // 2. direct-tcpip channel to target
         // 3. Target SSH session runs over channel (via SEND/RECV callbacks)
         // -----------------------------------------------------------------
+        // Force-create the SSH backend before ConnectViaJumpHost. The direct
+        // path lazily creates it inside InitializeSshSession() which runs
+        // AFTER the jump host stage, so on a cold start (first connection of
+        // the session is via ProxyJump) g_sshBackend is still null and the
+        // jump session creation dereferences nullptr.
+        if (!g_sshBackend)
+            g_sshBackend = CreateSshBackend();
         JumpHostSettings jump;
         jump.host        = ConnectSettings->jump_host;
         jump.port        = ConnectSettings->jump_port;

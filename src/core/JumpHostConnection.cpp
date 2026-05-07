@@ -238,11 +238,35 @@ static bool AuthJumpHost(
     int&                loop,
     SYSTICKS&           lasttime)
 {
-    // Get available auth methods.
-    char* authList = jmpSession->userauthList(
-        jump.user.c_str(), static_cast<unsigned>(jump.user.size()));
+    // Get available auth methods. The jump session is non-blocking, so the
+    // first call typically returns NULL with lastErrno() == LIBSSH2_ERROR_EAGAIN
+    // until the server's response packet has been received. Without this
+    // retry loop the call returns NULL once and we report "(none)" even when
+    // the server actually offers publickey/password/keyboard-interactive.
+    SFTP_LOG("JUMP", "Querying auth methods for user='%s'", jump.user.c_str());
+    char* authList = nullptr;
+    SYSTICKS authListStart = get_sys_ticks();
+    do {
+        authList = jmpSession->userauthList(
+            jump.user.c_str(), static_cast<unsigned>(jump.user.size()));
+        if (authList)
+            break;
+        const int err = jmpSession->lastErrno();
+        if (err != LIBSSH2_ERROR_EAGAIN) {
+            SFTP_LOG("JUMP", "userauthList non-EAGAIN errno=%d", err);
+            break;
+        }
+        if (get_ticks_between(authListStart) > SSH_PROBE_TIMEOUT_MS) {
+            SFTP_LOG("JUMP", "userauthList timeout after %d ms", SSH_PROBE_TIMEOUT_MS);
+            break;
+        }
+        if (ProgressLoop("Jump host: querying auth methods...", progress, progress + 2, &loop, &lasttime))
+            break;
+        IsSocketReadable(jmpSock);
+    } while (true);
 
     if (!authList && jmpSession->userauthAuthenticated()) {
+        SFTP_LOG("JUMP", "Server reported already authenticated (no auth list needed)");
         ShowStatusId(IDS_LOG_JUMP_AUTH_NONE, nullptr, true);
         return true;
     }
@@ -251,6 +275,8 @@ static bool AuthJumpHost(
     const bool canPubkey   = authList && strstr(authList, "publickey");
     const bool canKbd      = authList && strstr(authList, "keyboard-interactive");
 
+    SFTP_LOG("JUMP", "Auth methods: '%s' (pw=%d pk=%d kbd=%d)",
+             authList ? authList : "(none)", canPassword, canPubkey, canKbd);
     ShowStatus(("Jump host auth methods: " + (authList ? std::string(authList) : "(none)")).c_str());
 
     // --- 1. Agent auth ---

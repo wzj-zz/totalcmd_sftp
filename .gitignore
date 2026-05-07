@@ -29,6 +29,7 @@ build/Release/
 .idea/
 .claude/
 CLAUDE.md
+TODO.md
 
 # OS
 Thumbs.db
@@ -48,8 +49,7 @@ build.log
 # argon2_a_*.lib stays tracked (no build script in this repo for it).
 src/lib/libssh2_*.lib
 src/lib/libcrypto_*.lib
-thirdparty/build-deps.log
-build.log
+src/lib/ossl_static.pdb
 
 # Archiwa lokalne
 *.7z

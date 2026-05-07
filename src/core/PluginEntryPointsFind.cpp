@@ -143,6 +143,7 @@ static HANDLE LanCreateFindHandle(std::vector<LanPairSession::DirEntry> entries,
 HANDLE WINAPI FsFindFirstW(LPCWSTR Path, LPWIN32_FIND_DATAW FindData)
 {
     sftp::DllExceptionBarrier _barrier;
+    SFTP_LOG("FIND", "FsFindFirstW ENTRY path='%S'", Path ? Path : L"(null)");
     return sftp::dll_invoke(_barrier, INVALID_HANDLE_VALUE, [&]() -> HANDLE {
         int hr = ERROR_SUCCESS;
         std::array<WCHAR, wdirtypemax> remotedir{};
@@ -242,7 +243,9 @@ HANDLE WINAPI FsFindFirstW(LPCWSTR Path, LPWIN32_FIND_DATAW FindData)
         }
 
         // Retrieve the directory
+        SFTP_LOG("FIND", "FsFindFirstW: connection ready, calling SftpFindFirstFileW remotedir='%S'", remotedir.data());
         bool ok = (SFTP_OK == SftpFindFirstFileW(serverid, remotedir.data(), &sftpdataptr));
+        SFTP_LOG("FIND", "FsFindFirstW: SftpFindFirstFileW returned ok=%d", ok ? 1 : 0);
 
         if (wcslen(remotedir.data()) <= 1 || wcscmp(remotedir.data() + 1, L"home") == 0) {    // root -> add ~ link to home dir
             SYSTEMTIME st;

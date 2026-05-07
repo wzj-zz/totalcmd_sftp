@@ -1,6 +1,7 @@
 #include "global.h"
 #include <windows.h>
 #include <array>
+#include <cerrno>
 #include <memory>
 #include <format>
 #include <string>
@@ -34,6 +35,12 @@ static void session_free(LPVOID ptr, LPVOID* /*abstract*/)
 // These are installed before startup() when cs->transport_stream is set.
 // The session abstract is the pConnectSettings pointer (set at createSession).
 // ---------------------------------------------------------------------------
+// libssh2's transport layer (transport.c:487-499) tests the recv/send return
+// value with `nread == -EAGAIN` (POSIX errno), NOT `nread == -1 &&
+// WSAGetLastError() == WSAEWOULDBLOCK`. Returning -1 here makes libssh2 treat
+// would-block as a fatal socket error and abort KEX with
+// LIBSSH2_ERROR_KEY_EXCHANGE_FAILURE. Return `-EAGAIN` (== -11) so libssh2
+// recognises the would-block condition and propagates LIBSSH2_ERROR_EAGAIN up.
 static ssize_t transport_send_cb(
     libssh2_socket_t /*sock*/,
     const void* buffer, size_t length,
@@ -42,10 +49,9 @@ static ssize_t transport_send_cb(
 {
     auto* cs = static_cast<tConnectSettings*>(*abstract);
     ssize_t rc = cs->transport_stream->write(buffer, length);
-    if (rc == ITRANSPORT_EAGAIN) {
-        WSASetLastError(WSAEWOULDBLOCK);
-        return -1;
-    }
+    SFTP_LOG("XPRT", "send len=%zu rc=%zd", length, rc);
+    if (rc == ITRANSPORT_EAGAIN)
+        return -EAGAIN;
     return rc;
 }
 
@@ -57,10 +63,9 @@ static ssize_t transport_recv_cb(
 {
     auto* cs = static_cast<tConnectSettings*>(*abstract);
     ssize_t rc = cs->transport_stream->read(buffer, length);
-    if (rc == ITRANSPORT_EAGAIN) {
-        WSASetLastError(WSAEWOULDBLOCK);
-        return -1;
-    }
+    SFTP_LOG("XPRT", "recv len=%zu rc=%zd", length, rc);
+    if (rc == ITRANSPORT_EAGAIN)
+        return -EAGAIN;
     return rc;
 }
 
@@ -122,17 +127,29 @@ int InitializeSshSession(
 
     progress = 40; // PROG_SESSION_STARTUP
     LoadStr(buf, IDS_SESSION_STARTUP);
+    SFTP_LOG("CONN", "Target session startup begin (transport=%s)",
+             ConnectSettings->transport_stream
+                 ? ConnectSettings->transport_stream->describe()
+                 : "direct-socket");
     int auth;
+    int eagainIters = 0;
+    SYSTICKS startupT0 = get_sys_ticks();
     while ((auth = ConnectSettings->session->startup((int)ConnectSettings->sock)) == LIBSSH2_ERROR_EAGAIN) {
+        ++eagainIters;
         if (ProgressLoop(buf.data(), progress, progress + 20, &loop, &lasttime))
             break;
         WaitForTransportReadable(ConnectSettings);
     }
+    SFTP_LOG("CONN", "Target session startup done: rc=%d iters=%d elapsed=%ums",
+             auth, eagainIters, (unsigned)get_ticks_between(startupT0));
 
     if (auth) {
         char* errmsg;
         int errmsg_len;
         ConnectSettings->session->lastError(&errmsg, &errmsg_len, false);
+        SFTP_LOG("CONN", "Target session startup FAIL: errno=%d msg='%s'",
+                 ConnectSettings->session->lastErrno(),
+                 errmsg ? errmsg : "(no details)");
         ShowErrorId(IDS_ERR_SSH_SESSION, errmsg);
         if (LogProc) {
             const std::string msg = std::format("SFTP: SSH handshake failed: {}", errmsg ? errmsg : "(no details)");

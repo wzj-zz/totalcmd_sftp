@@ -20,7 +20,7 @@ $helpProject = Join-Path $projectRoot "src\help\sftpplug.hhp"
 $helpCompiled = Join-Path $projectRoot "src\help\sftpplug.chm"
 
 # Read plugin version from version.h (single source of truth)
-$pluginVersion = "10.0.1.0"
+$pluginVersion = "10.0.1.1"
 $verHPath = Join-Path $projectRoot "src\include\version.h"
 if (Test-Path $verHPath) {
     $verHContent = Get-Content $verHPath -Raw
@@ -201,7 +201,7 @@ function Clean-BuildOutput {
     foreach ($outDir in @($buildOutputDir, $buildOutputDirX86)) {
         if (Test-Path $outDir) {
             Get-ChildItem -Path $outDir | Where-Object {
-                $_.Name -notlike "*.wfx"
+                $_.Name -notlike "*.wfx" -and $_.Name -notlike "*.pdb"
             } | Remove-Item -Recurse -Force
         }
     }
@@ -392,7 +392,7 @@ type=wfx
 file=$projectName.wfx
 file64=$projectName.wfx64
 defaultdir=$projectName
-version=10.0.1.0
+version=10.0.1.1
 "@
 
     Add-Type -AssemblyName System.IO.Compression
@@ -421,6 +421,9 @@ version=10.0.1.0
     try {
         Add-ZipFile  (Join-Path $buildOutputDir    "$projectName.wfx") "$projectName.wfx64"
         Add-ZipFile  (Join-Path $buildOutputDirX86 "$projectName.wfx") "$projectName.wfx"
+        # NOTE: sftpplug.pdb is intentionally not packed for release. To ship
+        # a diagnostic build that resolves stack frames in C:\temp\sftpplug.log,
+        # set LOG_ENABLED=1 in global.h and re-enable PDB inclusion here.
         Add-ZipString $pluginstInf "pluginst.inf"
 
         if (Test-Path $phpAgentSource) { Add-ZipFile $phpAgentSource "sftp.php" }

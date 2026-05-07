@@ -240,6 +240,10 @@ BOOL APIENTRY DllMain( HANDLE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         hinst = (HINSTANCE)hModule;
+        // Top-level SEH filter for native crashes (AV, stack overflow, etc.)
+        // that bypass DllExceptionBarrier. Installed first so it's active for
+        // the whole DLL lifetime.
+        sftp::InstallCrashHandler();
         LoadStringW(hinst, IDS_F7NEW, s_f7newconnectionW.data(), static_cast<int>(s_f7newconnectionW.size()) - 1);
         walcopy(s_f7newconnection, s_f7newconnectionW.data(), countof(s_f7newconnection) - 1);
         LoadStringW(hinst, IDS_QUICKCONNECT, s_quickconnectW.data(), static_cast<int>(s_quickconnectW.size()) - 1);
@@ -253,6 +257,8 @@ BOOL APIENTRY DllMain( HANDLE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             WSACleanup();
             g_winsockInitialized = false;
         }
+        // Restore previous SEH filter before releasing DbgHelp symbol tables.
+        sftp::UninstallCrashHandler();
         // Release DbgHelp symbol tables — required for clean reload
         sftp::ShutdownSymbols();
     }
