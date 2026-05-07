@@ -27,6 +27,8 @@ build/Release/
 *.sdf
 *.opensdf
 .idea/
+.claude/
+CLAUDE.md
 
 # OS
 Thumbs.db

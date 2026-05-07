@@ -522,7 +522,13 @@ int SftpAuthPubKey(pConnectSettings ConnectSettings, LPCSTR progressbuf, int pro
 
     ShowStatusId(IDS_AUTH_PUBKEY_FOR, ConnectSettings->user.c_str(), true);
 
-    if (pubkeyfileptr && _stricmp(pubkeyfile.data(), privkeyfile.data()) == 0)
+    // libssh2's userauth_publickey_fromfile treats a non-NULL publickey arg as
+    // a path to read; an empty string makes it call fopen("") and bail with
+    // LIBSSH2_ERROR_FILE. We must hand it NULL when the user left the field
+    // blank (so OpenSSL backend derives the public key from the private one)
+    // or pointed both fields at the same file.
+    if (pubkeyfileptr && (pubkeyfile.data()[0] == 0 ||
+                          _stricmp(pubkeyfile.data(), privkeyfile.data()) == 0))
         pubkeyfileptr = nullptr;
 
     LoadStr(buf, IDS_AUTH_PUBKEY);
