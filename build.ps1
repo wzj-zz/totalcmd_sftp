@@ -20,7 +20,7 @@ $helpProject = Join-Path $projectRoot "src\help\sftpplug.hhp"
 $helpCompiled = Join-Path $projectRoot "src\help\sftpplug.chm"
 
 # Read plugin version from version.h (single source of truth)
-$pluginVersion = "10.0.0.17"
+$pluginVersion = "10.0.1.0"
 $verHPath = Join-Path $projectRoot "src\include\version.h"
 if (Test-Path $verHPath) {
     $verHContent = Get-Content $verHPath -Raw
@@ -258,10 +258,10 @@ if (Test-Path $vcToolsRoot) {
 
 # Validate VC tools version
 if ($vcToolsVersion) {
-    $minimumVcToolsVersion = [version]"14.50.0.0"
+    $minimumVcToolsVersion = [version]"14.44.0.0"
     $currentVcToolsVersion = [version]("$vcToolsVersion.0")
     if ($currentVcToolsVersion -lt $minimumVcToolsVersion) {
-        Write-Error "VC tools $vcToolsVersion detected. Version 14.50 or later required."
+        Write-Error "VC tools $vcToolsVersion detected. Version 14.44 or later required."
         exit 1
     }
 }
@@ -294,11 +294,38 @@ if (-not (Test-Path $vcxprojPath)) {
     exit 1
 }
 
+# Ensure libssh2 + libcrypto are present. These are not committed to the repo
+# (they are ~107 MB of binaries); build-deps.ps1 regenerates them from the
+# OpenSSL + libssh2 git submodules under thirdparty/.
+$requiredLibs = @('libssh2_x64.lib', 'libcrypto_x64.lib')
+if (-not $x64only) {
+    $requiredLibs += @('libssh2_x86.lib', 'libcrypto_x86.lib')
+}
+$missingLibs = $requiredLibs | Where-Object { -not (Test-Path (Join-Path $projectRoot "src\lib\$_")) }
+if ($missingLibs) {
+    Write-Host ""
+    Write-Host "--- Missing dependency libs ---" -ForegroundColor Cyan
+    $missingLibs | ForEach-Object { Write-Host "  src\lib\$_" -ForegroundColor Yellow }
+    $depsScript = Join-Path $projectRoot "build-deps.ps1"
+    if (-not (Test-Path $depsScript)) {
+        Write-Error "build-deps.ps1 not found; cannot rebuild missing libs."
+        exit 1
+    }
+    Write-Host "  Invoking build-deps.ps1 (one-time, ~5-10 min)..." -ForegroundColor Gray
+    $depsArgs = @()
+    if ($x64only) { $depsArgs += '-X64Only' }
+    & $depsScript @depsArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "build-deps.ps1 failed with exit code $LASTEXITCODE"
+        exit $LASTEXITCODE
+    }
+}
+
 $msBuildBase = @(
     $vcxprojPath,
     "/t:Rebuild",
     "/p:Configuration=Release",
-    "/p:PlatformToolset=v145",
+    "/p:PlatformToolset=v143",
     "/p:WindowsTargetPlatformVersion=10.0",
     "/p:DebugSymbols=false",
     "/p:DebugType=none",
@@ -365,7 +392,7 @@ type=wfx
 file=$projectName.wfx
 file64=$projectName.wfx64
 defaultdir=$projectName
-version=10.0.0.17
+version=10.0.1.0
 "@
 
     Add-Type -AssemblyName System.IO.Compression
