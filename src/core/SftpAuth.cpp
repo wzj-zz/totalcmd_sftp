@@ -393,7 +393,7 @@ int SftpAuthPageant(pConnectSettings ConnectSettings, LPCSTR progressbuf, int pr
                 ShowStatusId(IDS_LOG_PAGEANT_TIMEOUT, nullptr, true);
                 return finish(-IDS_AGENT_AUTHFAILED);
             }
-            WaitForTransportReadable(ConnectSettings);  // Sleep to avoid 100% CPU usage.
+            WaitForSshIo(ConnectSettings);
         }
 #ifndef SFTP_ALLINONE
         // NOTE: LIBSSH2_ERROR_REQUIRE_KEYBOARD / REQUIRE_PASSWORD are non-standard error codes
@@ -548,7 +548,7 @@ int SftpAuthPubKey(pConnectSettings ConnectSettings, LPCSTR progressbuf, int pro
             auth = LIBSSH2_ERROR_TIMEOUT;
             break;
         }
-        WaitForTransportReadable(ConnectSettings);  // Sleep to avoid 100% CPU usage.
+        WaitForSshIo(ConnectSettings);
     }
     AUTH_LOG("userauthPubkeyFromFile result=%d", auth);
 #ifndef SFTP_ALLINONE

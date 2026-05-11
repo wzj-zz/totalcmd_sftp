@@ -130,6 +130,28 @@ public:
         return select(0, &fds, nullptr, nullptr, &tv) > 0;
     }
 
+    bool waitForSshIo(ISshSession* sess, DWORD timeoutMs) override
+    {
+        if (sock_ == INVALID_SOCKET)
+            return false;
+        const int dirs = sess ? sess->blockDirections() : 0;
+        fd_set rfds, wfds;
+        FD_ZERO(&rfds);
+        FD_ZERO(&wfds);
+        // Always watch read: catches both incoming channel data and SSH
+        // control messages (e.g. window-update that unblocks a stalled
+        // channel write).
+        FD_SET(sock_, &rfds);
+        // Inner OUTBOUND-blocked write can also unblock when the jump TCP
+        // send buffer drains, so add write-watch only in that case.
+        if (dirs & LIBSSH2_SESSION_BLOCK_OUTBOUND)
+            FD_SET(sock_, &wfds);
+        struct timeval tv {};
+        tv.tv_sec  = static_cast<long>(timeoutMs / 1000);
+        tv.tv_usec = static_cast<long>((timeoutMs % 1000) * 1000);
+        return select(0, &rfds, &wfds, nullptr, &tv) > 0;
+    }
+
     const char* describe() const override { return desc_.c_str(); }
 
     void close() override

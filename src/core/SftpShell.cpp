@@ -31,33 +31,6 @@ constexpr DWORD kShellEagainGraceIdleMs   = 1000;
 constexpr DWORD kShellEagainGraceTotalMs  = 5000;
 constexpr DWORD kQuoteProgressStartMs     = 2000;
 
-// Helper: wait for an operation with timeout, handling EAGAIN
-template<typename F>
-int WaitForOperation(F&& op, DWORD timeoutMs, pConnectSettings cs, bool forWrite = false)
-{
-    const auto start = std::chrono::steady_clock::now();
-    int rc;
-    do {
-        rc = op();
-        if (rc != LIBSSH2_ERROR_EAGAIN)
-            return rc;
-        if (EscapePressed())
-            return LIBSSH2_ERROR_EAGAIN; // treat as abort
-        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - start).count();
-        if (elapsed > timeoutMs)
-            return LIBSSH2_ERROR_TIMEOUT;
-        if (cs && cs->sock != INVALID_SOCKET) {
-            if (forWrite)
-                IsSocketWritable(cs->sock);
-            else
-                IsSocketReadable(cs->sock);
-        } else {
-            Sleep(25);
-        }
-    } while (true);
-}
-
 // RAII wrapper for ISshChannel with automatic disconnect
 class ScopedChannel {
 public:
@@ -79,14 +52,14 @@ private:
         if (!cs_ || !channel_)
             return;
 
-        WaitForOperation([this] { return channel_->flush(); }, kShellFlushTimeoutMs / 2, cs_, true);
-        WaitForOperation([this] { return channel_->sendEof(); }, kShellEofTimeoutMs / 3, cs_, true);
-        WaitForOperation([this] { return channel_->waitEof(); }, kShellEofTimeoutMs / 3, cs_, false);
-        WaitForOperation([this] { return channel_->channelClose(); }, kShellCloseTimeoutMs / 3, cs_, true);
+        WaitForOperation([this] { return channel_->flush(); }, kShellFlushTimeoutMs / 2, cs_);
+        WaitForOperation([this] { return channel_->sendEof(); }, kShellEofTimeoutMs / 3, cs_);
+        WaitForOperation([this] { return channel_->waitEof(); }, kShellEofTimeoutMs / 3, cs_);
+        WaitForOperation([this] { return channel_->channelClose(); }, kShellCloseTimeoutMs / 3, cs_);
         // Explicit drained channelFree() preferred over destructor's bounded
         // tight-loop because shells on restrictive servers may need socket
         // yielding between EAGAIN retries.
-        WaitForOperation([this] { return channel_->channelFree(); }, kShellFreeTimeoutMs / 5, cs_, true);
+        WaitForOperation([this] { return channel_->channelFree(); }, kShellFreeTimeoutMs / 5, cs_);
         delete channel_;
     }
 
@@ -160,13 +133,12 @@ void DisconnectShell(ISshChannel* channel)
 {
     if (!channel)
         return;
-    // Use WaitForOperation with appropriate timeouts
-    WaitForOperation([channel] { return channel->flush(); }, kShellFlushTimeoutMs, nullptr, true);
-    WaitForOperation([channel] { return channel->sendEof(); }, kShellEofTimeoutMs, nullptr, true);
-    WaitForOperation([channel] { return channel->waitEof(); }, kShellEofTimeoutMs, nullptr, false);
-    WaitForOperation([channel] { return channel->channelClose(); }, kShellCloseTimeoutMs, nullptr, true);
+    WaitForOperation([channel] { return channel->flush(); }, kShellFlushTimeoutMs, nullptr);
+    WaitForOperation([channel] { return channel->sendEof(); }, kShellEofTimeoutMs, nullptr);
+    WaitForOperation([channel] { return channel->waitEof(); }, kShellEofTimeoutMs, nullptr);
+    WaitForOperation([channel] { return channel->channelClose(); }, kShellCloseTimeoutMs, nullptr);
     // Explicit drained channelFree() — see DisconnectShell rationale.
-    WaitForOperation([channel] { return channel->channelFree(); }, kShellFreeTimeoutMs, nullptr, true);
+    WaitForOperation([channel] { return channel->channelFree(); }, kShellFreeTimeoutMs, nullptr);
 }
 
 std::unique_ptr<ISshChannel> ConnectChannel(ISshSession* session, SOCKET sock)
@@ -227,11 +199,11 @@ bool SendChannelCommandNoEof([[maybe_unused]] ISshSession* session, ISshChannel*
         tempCtx.sock = sock;
         waitCtx = &tempCtx;
     }
-    int rc = WaitForOperation([&] { return channel->exec(command); }, SSH_AUTH_STAGE_TIMEOUT_MS, waitCtx, true);
+    int rc = WaitForOperation([&] { return channel->exec(command); }, SSH_AUTH_STAGE_TIMEOUT_MS, waitCtx);
     if (rc < 0)
         return false;
 
-    rc = WaitForOperation([&] { return channel->flush(); }, SSH_AUTH_STAGE_TIMEOUT_MS, waitCtx, true);
+    rc = WaitForOperation([&] { return channel->flush(); }, SSH_AUTH_STAGE_TIMEOUT_MS, waitCtx);
     return rc >= 0;
 }
 
@@ -245,7 +217,7 @@ bool SendChannelCommand(ISshSession* session, ISshChannel* channel, const char* 
         tempCtx.sock = sock;
         waitCtx = &tempCtx;
     }
-    WaitForOperation([&] { return channel->sendEof(); }, SSH_AUTH_STAGE_TIMEOUT_MS, waitCtx, true);
+    WaitForOperation([&] { return channel->sendEof(); }, SSH_AUTH_STAGE_TIMEOUT_MS, waitCtx);
     return true;
 }
 
@@ -286,7 +258,10 @@ bool GetChannelCommandReply(ISshSession* session, ISshChannel* channel, const ch
             std::chrono::steady_clock::now() - exitStart).count();
         if (elapsed > kChannelExitStatusWaitMs)
             break;
-        Sleep(50);
+        if (sock != INVALID_SOCKET)
+            IsSocketReadable(sock);
+        else
+            Sleep(50);
     }
 
     return (channel->getExitStatus() == 0 && !hasStderr);
@@ -316,14 +291,14 @@ bool EnsureScpShell(pConnectSettings cs)
     // Request PTY
     int ptyRc = WaitForOperation([&] {
         return channel->requestPty("vt102", 5, "", 0, 80, 40, 640, 480);
-    }, kScpPtyOpenTimeoutMs, cs, false);
+    }, kScpPtyOpenTimeoutMs, cs);
 
     if (ptyRc < 0 && ptyRc != LIBSSH2_ERROR_EAGAIN) {
         return false;
     }
 
 	// Start shell
-    int shellRc = WaitForOperation([&] { return channel->shell(); }, kScpShellOpenTimeoutMs, cs, false);
+    int shellRc = WaitForOperation([&] { return channel->shell(); }, kScpShellOpenTimeoutMs, cs);
     if (shellRc < 0) {
         return false;
     }

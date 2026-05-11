@@ -338,10 +338,9 @@ int SftpFindFirstFileW(pConnectSettings cs, LPCWSTR remotedir, LPVOID* davdatapt
                     return SFTP_FAILED;
             }
         } else {
-            IsSocketReadable(cs->sock);
+            WaitForSshIo(cs);
         }
 
-        Sleep(50);
         int delta = get_ticks_between(cs->findstarttime);
         if (delta > kSftpProgressStartMs && aborttime == -1) {
             if (ProgressProc(PluginNumber, dirStr.c_str(), "temp", (delta / kSftpProgressDivMs) % 100))
@@ -526,7 +525,6 @@ int SftpCreateDirectoryW(pConnectSettings cs, LPCWSTR Path)
         rc = cs->sftpsession->mkdir(dirStr.c_str(), cs->dirmod);
         if (rc == 0)
             break;
-        Sleep(50);
         int delta = get_ticks_between(cs->findstarttime);
         if (delta > kSftpProgressStartMs && aborttime == -1) {
             if (EscapePressed())
@@ -538,7 +536,7 @@ int SftpCreateDirectoryW(pConnectSettings cs, LPCWSTR Path)
             break;
         }
         if (rc == LIBSSH2_ERROR_EAGAIN)
-            IsSocketReadable(cs->sock);
+            WaitForSshIo(cs);
     } while (rc == LIBSSH2_ERROR_EAGAIN);
 
     if (rc == 0) {

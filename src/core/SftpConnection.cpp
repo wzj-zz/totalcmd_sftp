@@ -259,6 +259,39 @@ bool WaitForTransportReadable(pConnectSettings cs)
     return IsSocketReadable(cs->sock);
 }
 
+// Block_directions-aware wait. Picks read/write/both based on what libssh2
+// says it's waiting on; falls back to read when libssh2 has no opinion.
+// For ProxyJump the transport stream handles the nested wait — inner
+// OUTBOUND can unblock via either incoming window-update (jump read) or
+// outbound jump-TCP drain (jump write).
+bool WaitForSshIo(pConnectSettings cs, DWORD timeoutMs)
+{
+    if (!cs)
+        return false;
+
+    if (cs->transport_stream)
+        return cs->transport_stream->waitForSshIo(cs->session.get(), timeoutMs);
+
+    if (cs->sock == INVALID_SOCKET)
+        return false;
+
+    const int dirs = cs->session ? cs->session->blockDirections() : 0;
+    fd_set rfds, wfds;
+    FD_ZERO(&rfds);
+    FD_ZERO(&wfds);
+
+    if (dirs & LIBSSH2_SESSION_BLOCK_INBOUND)
+        FD_SET(cs->sock, &rfds);
+    if (dirs & LIBSSH2_SESSION_BLOCK_OUTBOUND)
+        FD_SET(cs->sock, &wfds);
+    if (!dirs)
+        FD_SET(cs->sock, &rfds);
+
+    timeval tv = { static_cast<long>(timeoutMs / 1000),
+                   static_cast<long>((timeoutMs % 1000) * 1000) };
+    return select(0, &rfds, &wfds, nullptr, &tv) > 0;
+}
+
 extern "C"
 int mysend(SOCKET s, LPCSTR buf, int len, int flags, LPCSTR progressmessage, int progressstart, int * ploop, SYSTICKS * plasttime)
 {
@@ -296,7 +329,9 @@ int myrecv(SOCKET s, LPSTR buf, int len, int flags, LPCSTR progressmessage, int 
         }
         if (ProgressLoop(progressmessage, progressstart, progressstart + 10, ploop, plasttime))
             break;   /* User aborted. */
-        Sleep(SOCKET_POLL_MS);
+        // No Sleep here: IsSocketReadable() above already blocked up to
+        // SOCKET_READ_POLL_MS waiting for data; extra Sleep would just be
+        // dead wait.
     }
     return ret;
 }

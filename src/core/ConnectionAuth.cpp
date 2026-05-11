@@ -198,10 +198,7 @@ int PerformAuthentication(
                     ShowStatusId(IDS_LOG_KBD_AUTH_TIMEOUT, nullptr, true);
                     break;
                 }
-                if (dirs & LIBSSH2_SESSION_BLOCK_OUTBOUND)
-                    IsSocketWritable(cs->sock);
-                else
-                    WaitForTransportReadable(cs);
+                WaitForSshIo(cs);
             }
             SFTP_LOG("AUTH", "kbd done auth=%d iters=%d cbSent=%d", auth, kbdIter, ConnectSettings->InteractivePasswordSent ? 1 : 0);
             if (auth) {
@@ -252,10 +249,7 @@ int PerformAuthentication(
                         ShowStatusId(IDS_LOG_PASS_AUTH_TIMEOUT, nullptr, true);
                         break;
                     }
-                    if (dirs & LIBSSH2_SESSION_BLOCK_OUTBOUND)
-                        IsSocketWritable(ConnectSettings->sock);
-                    else
-                        WaitForTransportReadable(ConnectSettings);
+                    WaitForSshIo(ConnectSettings);
                 }
             }
             SFTP_LOG("AUTH", "pass done auth=%d iters=%d", auth, passIter);
@@ -289,10 +283,7 @@ int PerformAuthentication(
                     ShowStatusId(IDS_LOG_KBD_AUTH_TIMEOUT, nullptr, true);
                     break;
                 }
-                if (dirs & LIBSSH2_SESSION_BLOCK_OUTBOUND)
-                    IsSocketWritable(cs->sock);
-                else
-                    WaitForTransportReadable(cs);
+                WaitForSshIo(cs);
             }
             SFTP_LOG("AUTH", "kbd2 done auth=%d iters=%d cbSent=%d", auth, kbdIter2, ConnectSettings->InteractivePasswordSent ? 1 : 0);
             if (auth) {

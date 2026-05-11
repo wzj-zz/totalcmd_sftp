@@ -151,26 +151,11 @@ public:
     int Close() {
         if (!channel_ || !cs_) return 0;
         // Attempt graceful shutdown
-        auto wait = [&](auto fn, DWORD timeoutMs) {
-            const auto start = std::chrono::steady_clock::now();
-            int rc;
-            do {
-                rc = fn();
-                if (rc != LIBSSH2_ERROR_EAGAIN)
-                    return rc;
-                const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now() - start).count();
-                if (elapsed > timeoutMs)
-                    break;
-                IsSocketReadable(cs_->sock);
-            } while (true);
-            return rc;
-        };
-        wait([this] { return channel_->sendEof(); }, 1000);
-        wait([this] { return channel_->waitEof(); }, 1000);
-        wait([this] { return channel_->channelClose(); }, 1000);
+        WaitForOperation([this] { return channel_->sendEof(); }, 1000, cs_);
+        WaitForOperation([this] { return channel_->waitEof(); }, 1000, cs_);
+        WaitForOperation([this] { return channel_->channelClose(); }, 1000, cs_);
         // Explicit drained channelFree() — see class header comment.
-        wait([this] { return channel_->channelFree(); }, 2000);
+        WaitForOperation([this] { return channel_->channelFree(); }, 2000, cs_);
         channel_.reset();
         return 0;
     }

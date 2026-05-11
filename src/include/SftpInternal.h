@@ -8,6 +8,7 @@
 #include <array>
 #include <vector>
 #include <string>
+#include <chrono>
 #include <cstdint>  // for int8_t
 
 inline bool IsPhpAgentTransport(const pConnectSettings cs) noexcept
@@ -117,6 +118,34 @@ bool  IsSocketError(SOCKET s);
 bool  IsSocketWritable(SOCKET s);
 bool  IsSocketReadable(SOCKET s);
 bool  WaitForTransportReadable(pConnectSettings cs);
+bool  WaitForSshIo(pConnectSettings cs, DWORD timeoutMs = SOCKET_READ_POLL_MS);
+
+// Generic EAGAIN-loop wrapper. Retries op() until it returns non-EAGAIN,
+// timeout elapses, or Esc is pressed. Between attempts waits on the SSH
+// socket in whichever direction libssh2 reports it's blocked on.
+// Returns op()'s result on success, LIBSSH2_ERROR_TIMEOUT on timeout,
+// LIBSSH2_ERROR_EAGAIN on abort.
+template<typename F>
+int WaitForOperation(F&& op, DWORD timeoutMs, pConnectSettings cs)
+{
+    const auto start = std::chrono::steady_clock::now();
+    int rc;
+    do {
+        rc = op();
+        if (rc != LIBSSH2_ERROR_EAGAIN)
+            return rc;
+        if (EscapePressed())
+            return LIBSSH2_ERROR_EAGAIN;
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start).count();
+        if (elapsed > timeoutMs)
+            return LIBSSH2_ERROR_TIMEOUT;
+        if (cs && (cs->sock != INVALID_SOCKET || cs->transport_stream))
+            WaitForSshIo(cs, SOCKET_READ_POLL_MS);
+        else
+            Sleep(25);
+    } while (true);
+}
 
 void  EncryptString(LPCTSTR pszPlain,     LPTSTR pszEncrypted, UINT cchEncrypted);
 void  DecryptString(LPCTSTR pszEncrypted, LPTSTR pszPlain,     UINT cchPlain);

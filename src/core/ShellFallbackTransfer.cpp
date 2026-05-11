@@ -365,7 +365,7 @@ static int ShellDdDownloadRaw(
                 DisconnectShell(ch.get());
                 return SFTP_READFAILED;
             }
-            ScpWaitIo(cs, false);
+            WaitForSshIo(cs);
         } else if (rc == 0 || ch->eof()) {
             break; // clean EOF
         } else {
@@ -536,7 +536,7 @@ static int ShellDdUploadRaw(
     while (ch->sendEof() == LIBSSH2_ERROR_EAGAIN) {
         if (get_ticks_between(eofStart) > (int)SFTP_SCP_WRITE_IDLE_TIMEOUT_MS)
             break;
-        ScpWaitIo(cs, true);
+        WaitForSshIo(cs);
     }
     // Wait for remote cat to finish writing.
     const SYSTICKS waitStart = get_sys_ticks();
@@ -545,7 +545,7 @@ static int ShellDdUploadRaw(
             break;
         if (EscapePressed())
             break;
-        ScpWaitIo(cs, false);
+        WaitForSshIo(cs);
     }
 
     DisconnectShell(ch.get());
