@@ -36,7 +36,10 @@ private:
 class Libssh2Channel : public ISshChannel {
 public:
     explicit Libssh2Channel(LIBSSH2_CHANNEL* ch) : channel_(ch) {}
-    ~Libssh2Channel() override = default;
+    // RAII free: matches Libssh2SftpHandle pattern. Without explicit destructor
+    // a dropped unique_ptr leaks the libssh2 channel, which on the server side
+    // counts against MaxSessions per SSH connection.
+    ~Libssh2Channel() override;
 
     ssize_t read(char* buf, size_t len) override;
     ssize_t readStderr(char* buf, size_t len) override;
@@ -82,7 +85,9 @@ private:
 class Libssh2SftpSession : public ISftpSession {
 public:
     explicit Libssh2SftpSession(LIBSSH2_SFTP* sftp) : sftp_(sftp) {}
-    ~Libssh2SftpSession() override = default;
+    // RAII shutdown: leaks the SFTP subsystem channel without this. Visible
+    // server-side as a stray channel counted against MaxSessions.
+    ~Libssh2SftpSession() override;
 
     std::unique_ptr<ISftpHandle> open(const char* path, unsigned long flags,
                                       long mode) override;
@@ -108,7 +113,10 @@ private:
 class Libssh2Session : public ISshSession {
 public:
     explicit Libssh2Session(LIBSSH2_SESSION* s) : session_(s) {}
-    ~Libssh2Session() override = default;
+    // RAII disconnect+free: without this a dropped unique_ptr leaks the SSH
+    // session entirely (socket level + sshd-side process). Best-effort
+    // disconnect first to inform the server, then free the libssh2 struct.
+    ~Libssh2Session() override;
 
     int startup(int sock) override;
     void setBlocking(int blocking) override;

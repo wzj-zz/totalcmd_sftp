@@ -674,77 +674,64 @@ bool SftpConfigureServer(LPCSTR DisplayName, LPCSTR inifilename)
 
 int SftpCloseConnection(pConnectSettings ConnectSettings)
 {
-    int rc;
-    if (ConnectSettings) {
-        // LAN Pair: disconnect file session immediately.
-        if (ConnectSettings->lanSession) {
-            ConnectSettings->lanSession->disconnect();
-            ConnectSettings->lanSession.reset();
-        }
-        // Fast teardown path: during full disconnect do not perform graceful shell
-        // shutdown (can block UI on restrictive SCP servers). Session disconnect
-        // below will close remote channels anyway.
-        if (ConnectSettings->scpShellChannel) {
-            ConnectSettings->scpShellChannel.reset();
-            ConnectSettings->scpShellMsgBuf.clear();
-            ConnectSettings->scpShellErrBuf.clear();
-        }
-        if (ConnectSettings->scponly) {
-            // Fast close for SCP-only sessions: skip graceful shutdown loops that can block UI.
-            ConnectSettings->sftpsession.reset();
-            if (ConnectSettings->session) {
-                ConnectSettings->session->free();
-                ConnectSettings->session.reset();
-            }
-            if (ConnectSettings->sock != INVALID_SOCKET) {
-                closesocket(ConnectSettings->sock);
-                ConnectSettings->sock = INVALID_SOCKET;
-            }
-            ConnectSettings->transport_stream.reset();
-            ConnectSettings->feedback.reset();
-            return SFTP_FAILED;
-        }
-        SYSTICKS starttime = get_sys_ticks();
-        bool doabort = false;
-        if (ConnectSettings->sftpsession) {
-            do {
-                rc = ConnectSettings->sftpsession->shutdown();
-                if (EscapePressed())
-                    doabort = true;
-                if (doabort && get_ticks_between(starttime) > DISCONNECT_ABORT_MS)
-                    break;
-                if (get_ticks_between(starttime) > DISCONNECT_TIMEOUT_MS)
-                    break;
-                if (rc == LIBSSH2_ERROR_EAGAIN)
-                    WaitForTransportReadable(ConnectSettings);  // Sleep to avoid 100% CPU usage.
-            } while (rc == LIBSSH2_ERROR_EAGAIN);
-            ConnectSettings->sftpsession.reset();
-        }
-        if (ConnectSettings->session) {
-            do {
-                rc = ConnectSettings->session->disconnect("Disconnect");
-                if (EscapePressed())
-                    doabort = true;
-                if (doabort && get_ticks_between(starttime) > DISCONNECT_ABORT_MS)
-                    break;
-                if (get_ticks_between(starttime) > DISCONNECT_TIMEOUT_MS)
-                    break;
-                if (rc == LIBSSH2_ERROR_EAGAIN)
-                    WaitForTransportReadable(ConnectSettings);  // Sleep to avoid 100% CPU usage.
-            } while (rc == LIBSSH2_ERROR_EAGAIN);
-            ConnectSettings->session->free();
-            ConnectSettings->session.reset();
-        }
-        // Release the transport stream (jump channel + jump SSH session) AFTER
-        // the target session is freed above and BEFORE the jump socket closes.
-        ConnectSettings->transport_stream.reset();
-        if (ConnectSettings->sock != INVALID_SOCKET) {
-            Sleep(RECONNECT_SLEEP_MS);
-            closesocket(ConnectSettings->sock);
-            ConnectSettings->sock = INVALID_SOCKET;
-        }
-        ConnectSettings->feedback.reset();
+    if (!ConnectSettings)
+        return SFTP_FAILED;
+
+    // 1. LAN Pair (own transport, not SSH) — quick disconnect.
+    if (ConnectSettings->lanSession) {
+        ConnectSettings->lanSession->disconnect();
+        ConnectSettings->lanSession.reset();
     }
+
+    // 2. SCP shell channel (only present in scponly mode). Destructor of
+    //    Libssh2Channel sends SSH_MSG_CHANNEL_CLOSE/free with bounded retry.
+    if (ConnectSettings->scpShellChannel) {
+        ConnectSettings->scpShellChannel.reset();
+        ConnectSettings->scpShellMsgBuf.clear();
+        ConnectSettings->scpShellErrBuf.clear();
+    }
+
+    // 3. SFTP subsystem (only present in SFTP mode). ~Libssh2SftpSession()
+    //    sends SFTP_FXP_SHUTDOWN with a bounded retry.
+    ConnectSettings->sftpsession.reset();
+
+    // 4. SSH session — send SSH_MSG_DISCONNECT once. RFC 4253 §11.1: server
+    //    must not reply, so there is nothing to wait for. EAGAIN here means
+    //    the SSH packet did not fit in libssh2's send buffer; retry briefly
+    //    just to push it into the OS socket buffer (TCP itself handles wire
+    //    delivery from there).
+    if (ConnectSettings->session) {
+        SYSTICKS t0 = get_sys_ticks();
+        int rc;
+        do {
+            rc = ConnectSettings->session->disconnect("Disconnect");
+            if (rc != LIBSSH2_ERROR_EAGAIN)
+                break;
+            if (get_ticks_between(t0) > 200)
+                break;   // 200 ms cap — DISCONNECT is ~50 bytes, must fit by now.
+            if (ConnectSettings->sock != INVALID_SOCKET) {
+                fd_set wfds;
+                FD_ZERO(&wfds);
+                FD_SET(ConnectSettings->sock, &wfds);
+                timeval tv = { 0, 20000 };  // 20 ms
+                select(0, nullptr, &wfds, nullptr, &tv);
+            }
+        } while (true);
+        ConnectSettings->session.reset();   // ~Libssh2Session() frees the struct.
+    }
+
+    // 5. ProxyJump transport (jump channel + jump session) — destructors
+    //    cascade and tear down the inner session/channel cleanly.
+    ConnectSettings->transport_stream.reset();
+
+    // 6. TCP socket — graceful close: the OS flushes any pending DISCONNECT
+    //    bytes before sending FIN. No artificial Sleep needed.
+    if (ConnectSettings->sock != INVALID_SOCKET) {
+        closesocket(ConnectSettings->sock);
+        ConnectSettings->sock = INVALID_SOCKET;
+    }
+
+    ConnectSettings->feedback.reset();
     return SFTP_FAILED;
 }
 

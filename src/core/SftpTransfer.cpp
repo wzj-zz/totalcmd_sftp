@@ -103,7 +103,10 @@ private:
     HANDLE handle_ = INVALID_HANDLE_VALUE;
 };
 
-// RAII wrapper for remote SFTP handle
+// RAII wrapper for remote SFTP handle. ~Libssh2SftpHandle() also drains close
+// (bounded tight loop), so this wrapper is functionally optional — kept as a
+// readability aid that makes the close point in the upload/download flow
+// explicit.
 class RemoteSftpFile {
 public:
     explicit RemoteSftpFile(std::unique_ptr<ISftpHandle> h) : handle_(std::move(h)) {}
@@ -129,7 +132,10 @@ private:
     std::unique_ptr<ISftpHandle> handle_;
 };
 
-// RAII wrapper for remote SCP channel
+// RAII wrapper for remote SCP channel. Adds explicit timeout-driven close
+// (sendEof / waitEof / channelClose / channelFree) with socket yielding;
+// destructor of bare Libssh2Channel performs only a bounded tight-loop free.
+// Kept because SCP servers can be timing-sensitive on teardown.
 class RemoteScpChannel {
 public:
     explicit RemoteScpChannel(std::unique_ptr<ISshChannel> ch, pConnectSettings cs)
@@ -163,6 +169,7 @@ public:
         wait([this] { return channel_->sendEof(); }, 1000);
         wait([this] { return channel_->waitEof(); }, 1000);
         wait([this] { return channel_->channelClose(); }, 1000);
+        // Explicit drained channelFree() — see class header comment.
         wait([this] { return channel_->channelFree(); }, 2000);
         channel_.reset();
         return 0;

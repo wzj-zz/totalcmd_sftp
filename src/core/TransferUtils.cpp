@@ -15,7 +15,9 @@
 namespace {
 constexpr int SFTP_PROGRESS_ABORT_POLL_MS = 5000;
 
-// RAII wrapper for SSH channel with automatic timeout handling
+// RAII wrapper for SSH channel with explicit timeout-driven close. Provides
+// EAGAIN-poll cleanup with cancellation support; destructor of bare
+// Libssh2Channel only does a bounded tight-loop free without yielding.
 class ScopedChannel {
 public:
     explicit ScopedChannel(ISshChannel* channel, pConnectSettings cs) noexcept
@@ -58,6 +60,7 @@ private:
         wait([&] { return channel_->sendEof(); }, 1000);
         wait([&] { return channel_->waitEof(); }, 1000);
         wait([&] { return channel_->channelClose(); }, 1000);
+        // Explicit drained channelFree() — see class header comment.
         wait([&] { return channel_->channelFree(); }, 2000);
         delete channel_;
     }

@@ -66,11 +66,10 @@ static constexpr DWORD SOCKET_POLL_MS           = 50;
 static constexpr DWORD SOCKET_READ_POLL_MS      = 1000;
 static constexpr DWORD PROGRESS_UPDATE_MS       = 100;
 
-// Disconnect/reconnect loop timeouts (used in SftpCloseConnection and
-// ReconnectSFTPChannelIfNeeded to avoid hanging indefinitely).
-static constexpr DWORD DISCONNECT_ABORT_MS      = 2000;  // abort if user pressed Escape
-static constexpr DWORD DISCONNECT_TIMEOUT_MS    = 5000;  // hard timeout without user input
-static constexpr DWORD RECONNECT_SFTP_TIMEOUT_MS = 2000; // partial reconnect timeout
+// Reconnect timeout (used by ReconnectSFTPChannelIfNeeded). Disconnect itself
+// no longer needs a multi-second timeout — SSH_MSG_DISCONNECT is fire-and-forget
+// per RFC 4253 §11.1, so SftpCloseConnection only briefly retries on EAGAIN.
+static constexpr DWORD RECONNECT_SFTP_TIMEOUT_MS = 2000;
 
 // Tri-state flags for auto-detection fields (utf8names, unixlinebreaks, scpserver64bit).
 // AUTODETECT_PENDING means we haven't queried the server yet.

@@ -135,7 +135,26 @@ int Libssh2Channel::channelClose()
 
 int Libssh2Channel::channelFree()
 {
-    return libssh2_channel_free(channel_);
+    int rc = libssh2_channel_free(channel_);
+    if (rc != LIBSSH2_ERROR_EAGAIN)
+        channel_ = nullptr;   // libssh2 freed it; avoid double-free in dtor.
+    return rc;
+}
+
+Libssh2Channel::~Libssh2Channel()
+{
+    if (!channel_)
+        return;
+    // Drain libssh2_channel_free on EAGAIN (async send of CHANNEL_CLOSE/EOF).
+    // Bounded loop guards against pathological dead-session spin.
+    for (int i = 0; i < 200; ++i) {
+        int rc = libssh2_channel_free(channel_);
+        if (rc != LIBSSH2_ERROR_EAGAIN) {
+            channel_ = nullptr;
+            return;
+        }
+    }
+    channel_ = nullptr;   // give up; session->free will clean residue.
 }
 
 int Libssh2Channel::flush()
@@ -198,8 +217,10 @@ Libssh2Agent::~Libssh2Agent()
 {
     // libssh2_agent_free() must be called exactly once; doing it here ensures
     // it runs even on error paths, regardless of whether disconnect() was called.
-    if (agent_)
+    if (agent_) {
         libssh2_agent_free(agent_);
+        agent_ = nullptr;
+    }
 }
 
 // ===========================================================================
@@ -230,7 +251,24 @@ std::unique_ptr<ISftpHandle> Libssh2SftpSession::openDir(const char* path)
 
 int Libssh2SftpSession::shutdown()
 {
-    return libssh2_sftp_shutdown(sftp_);
+    int rc = libssh2_sftp_shutdown(sftp_);
+    if (rc != LIBSSH2_ERROR_EAGAIN)
+        sftp_ = nullptr;   // libssh2 freed the SFTP subsystem.
+    return rc;
+}
+
+Libssh2SftpSession::~Libssh2SftpSession()
+{
+    if (!sftp_)
+        return;
+    for (int i = 0; i < 200; ++i) {
+        int rc = libssh2_sftp_shutdown(sftp_);
+        if (rc != LIBSSH2_ERROR_EAGAIN) {
+            sftp_ = nullptr;
+            return;
+        }
+    }
+    sftp_ = nullptr;
 }
 
 unsigned long Libssh2SftpSession::lastError()
@@ -323,7 +361,34 @@ int Libssh2Session::disconnect(const char* desc)
 
 int Libssh2Session::free()
 {
-    return libssh2_session_free(session_);
+    int rc = libssh2_session_free(session_);
+    if (rc != LIBSSH2_ERROR_EAGAIN)
+        session_ = nullptr;
+    return rc;
+}
+
+Libssh2Session::~Libssh2Session()
+{
+    if (!session_)
+        return;
+    // Best-effort SSH disconnect (lets server tear down cleanly). Bounded
+    // because we're in a destructor — if it doesn't drain in 50 iterations
+    // we'd rather leak the on-the-wire DISCONNECT than spin forever.
+    for (int i = 0; i < 50; ++i) {
+        int rc = libssh2_session_disconnect_ex(
+            session_, SSH_DISCONNECT_BY_APPLICATION, "Session destroyed", "");
+        if (rc != LIBSSH2_ERROR_EAGAIN)
+            break;
+    }
+    // Free regardless of disconnect outcome; session memory must be released.
+    for (int i = 0; i < 200; ++i) {
+        int rc = libssh2_session_free(session_);
+        if (rc != LIBSSH2_ERROR_EAGAIN) {
+            session_ = nullptr;
+            return;
+        }
+    }
+    session_ = nullptr;
 }
 
 const char* Libssh2Session::hostkeyHash(int hashType)

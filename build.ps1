@@ -20,7 +20,7 @@ $helpProject = Join-Path $projectRoot "src\help\sftpplug.hhp"
 $helpCompiled = Join-Path $projectRoot "src\help\sftpplug.chm"
 
 # Read plugin version from version.h (single source of truth)
-$pluginVersion = "10.0.1.1"
+$pluginVersion = "10.0.1.2"
 $verHPath = Join-Path $projectRoot "src\include\version.h"
 if (Test-Path $verHPath) {
     $verHContent = Get-Content $verHPath -Raw
@@ -392,7 +392,7 @@ type=wfx
 file=$projectName.wfx
 file64=$projectName.wfx64
 defaultdir=$projectName
-version=10.0.1.1
+version=10.0.1.2
 "@
 
     Add-Type -AssemblyName System.IO.Compression

@@ -75,7 +75,7 @@ public:
             ScpWaitFor(cs_, false, SFTP_SCP_READ_IDLE_TIMEOUT_MS,
                        [this] { return channel_->waitEof(); });
             channel_->channelClose();
-            channel_->channelFree();
+            // ~Libssh2Channel() in unique_ptr scope-exit handles channelFree.
         }
     }
 

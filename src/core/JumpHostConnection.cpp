@@ -138,27 +138,25 @@ public:
             return;
         closed_ = true;
 
-        // Close the direct-tcpip channel gracefully.
+        // Close the direct-tcpip channel gracefully (sendEof + channel close).
+        // ~Libssh2Channel() in channel_.reset() drains the actual free.
         if (channel_) {
             channel_->sendEof();
             channel_->channelClose();
-            channel_->channelFree();
             channel_.reset();
         }
 
-        // Disconnect the jump SSH session.
+        // Disconnect the jump SSH session — best-effort with brief socket drain.
+        // ~Libssh2Session() in session_.reset() handles the free.
         if (session_) {
-            // Non-blocking disconnect — best effort, ignore EAGAIN.
             for (int i = 0; i < 30; ++i) {
                 int r = session_->disconnect("ProxyJump closed");
                 if (r != LIBSSH2_ERROR_EAGAIN)
                     break;
-                // Give the socket a tick to drain.
                 fd_set fds; FD_ZERO(&fds); FD_SET(sock_, &fds);
                 struct timeval tv { 0, 50000 };
                 select(0, &fds, nullptr, nullptr, &tv);
             }
-            session_->free();
             session_.reset();
         }
         // NOTE: sock_ is NOT closed here.
@@ -472,7 +470,7 @@ std::unique_ptr<ITransportStream> ConnectViaJumpHost(
             ShowStatusId(IDS_LOG_JUMP_HANDSHAKE_FAIL, msg ? msg : "unknown", true);
             if (cs->feedback)
                 cs->feedback->ShowError(("ProxyJump: jump host SSH handshake failed: " + (msg ? std::string(msg) : "")).c_str());
-            jmpSession->free();
+            // jmpSession destructor (unique_ptr scope-exit) handles disconnect+free.
             closesocket(jmpSock);
             return nullptr;
         }
@@ -484,7 +482,7 @@ std::unique_ptr<ITransportStream> ConnectViaJumpHost(
     // -----------------------------------------------------------------------
     if (!VerifyJumpFingerprint(cs, jmpSession.get(), jump)) {
         jmpSession->disconnect("fingerprint rejected");
-        jmpSession->free();
+        // jmpSession destructor (unique_ptr scope-exit) handles disconnect+free.
         closesocket(jmpSock);
         ShowStatusId(IDS_LOG_JUMP_FP_REJECTED, nullptr, true);
         return nullptr;
@@ -496,7 +494,7 @@ std::unique_ptr<ITransportStream> ConnectViaJumpHost(
     ShowStatus(("Jump host: authenticating as " + jump.user + "...").c_str());
     if (!AuthJumpHost(cs, jmpSession.get(), jump, jmpSock, progress, loop, lasttime)) {
         jmpSession->disconnect("auth failed");
-        jmpSession->free();
+        // jmpSession destructor (unique_ptr scope-exit) handles disconnect+free.
         closesocket(jmpSock);
         if (cs->feedback)
             cs->feedback->ShowError(("ProxyJump: authentication to jump host failed.\nUser: " + jump.user).c_str());
@@ -534,7 +532,7 @@ std::unique_ptr<ITransportStream> ConnectViaJumpHost(
         if (cs->feedback)
             cs->feedback->ShowError(("ProxyJump: cannot open tunnel to " + targetHost + ":" + std::to_string(targetPort) + "\n" + (msg ? msg : "")).c_str());
         jmpSession->disconnect("direct-tcpip failed");
-        jmpSession->free();
+        // jmpSession destructor (unique_ptr scope-exit) handles disconnect+free.
         closesocket(jmpSock);
         return nullptr;
     }

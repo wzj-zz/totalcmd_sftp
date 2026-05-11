@@ -83,6 +83,9 @@ private:
         WaitForOperation([this] { return channel_->sendEof(); }, kShellEofTimeoutMs / 3, cs_, true);
         WaitForOperation([this] { return channel_->waitEof(); }, kShellEofTimeoutMs / 3, cs_, false);
         WaitForOperation([this] { return channel_->channelClose(); }, kShellCloseTimeoutMs / 3, cs_, true);
+        // Explicit drained channelFree() preferred over destructor's bounded
+        // tight-loop because shells on restrictive servers may need socket
+        // yielding between EAGAIN retries.
         WaitForOperation([this] { return channel_->channelFree(); }, kShellFreeTimeoutMs / 5, cs_, true);
         delete channel_;
     }
@@ -162,6 +165,7 @@ void DisconnectShell(ISshChannel* channel)
     WaitForOperation([channel] { return channel->sendEof(); }, kShellEofTimeoutMs, nullptr, true);
     WaitForOperation([channel] { return channel->waitEof(); }, kShellEofTimeoutMs, nullptr, false);
     WaitForOperation([channel] { return channel->channelClose(); }, kShellCloseTimeoutMs, nullptr, true);
+    // Explicit drained channelFree() — see DisconnectShell rationale.
     WaitForOperation([channel] { return channel->channelFree(); }, kShellFreeTimeoutMs, nullptr, true);
 }
 
@@ -345,7 +349,7 @@ void CloseScpShell(pConnectSettings cs)
 
         if (cs->scp_fast_close_required) {
             cs->scpShellChannel->channelClose();
-            cs->scpShellChannel->channelFree();
+            // ~Libssh2Channel() handles channelFree on scope exit.
         } else {
             DisconnectShell(cs->scpShellChannel.get());
         }
