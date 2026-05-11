@@ -35,7 +35,32 @@ int Libssh2SftpHandle::readdir(char* buf, size_t blen,
 
 int Libssh2SftpHandle::close()
 {
-    return libssh2_sftp_close_handle(handle_);
+    int rc = libssh2_sftp_close_handle(handle_);
+    if (rc != LIBSSH2_ERROR_EAGAIN)
+        handle_ = nullptr;   // libssh2 frees the handle on success/error; null it so the destructor doesn't double-close.
+    return rc;
+}
+
+Libssh2SftpHandle::~Libssh2SftpHandle()
+{
+    if (!handle_)
+        return;
+    // Drain the close on a non-blocking session. libssh2_sftp_close_handle
+    // sends SFTP_FXP_CLOSE and waits for the server's STATUS reply; until both
+    // are flushed through the channel, the server keeps the file descriptor
+    // open. Loop until non-EAGAIN. Bounded retry guards against pathological
+    // cases (broken socket, dead session) where we'd otherwise spin forever.
+    for (int i = 0; i < 200; ++i) {
+        int rc = libssh2_sftp_close_handle(handle_);
+        if (rc != LIBSSH2_ERROR_EAGAIN) {
+            handle_ = nullptr;
+            return;
+        }
+    }
+    // Best-effort give-up: libssh2 still owns the handle structure; on session
+    // free it will be released. Server-side may briefly hold the file but that
+    // matches the prior (buggy) behaviour, so this is no regression.
+    handle_ = nullptr;
 }
 
 void Libssh2SftpHandle::seek(size_t offset)

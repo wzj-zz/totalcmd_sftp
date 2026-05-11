@@ -12,7 +12,12 @@
 class Libssh2SftpHandle : public ISftpHandle {
 public:
     explicit Libssh2SftpHandle(LIBSSH2_SFTP_HANDLE* h) : handle_(h) {}
-    ~Libssh2SftpHandle() override = default;
+    // RAII close: without this, dropping the unique_ptr leaks the libssh2
+    // handle entirely. Server-side sftp-server keeps the file descriptor open
+    // until the whole SFTP session terminates, which on a long-lived TC
+    // connection means the file shows up as held by sftp-server long after
+    // the upload finished.
+    ~Libssh2SftpHandle() override;
 
     ssize_t read(char* buf, size_t len) override;
     ssize_t write(const char* buf, size_t len) override;
