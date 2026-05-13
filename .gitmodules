@@ -4,3 +4,6 @@
 [submodule "thirdparty/libssh2"]
 	path = thirdparty/libssh2
 	url = https://github.com/libssh2/libssh2.git
+[submodule "thirdparty/argon2"]
+	path = thirdparty/argon2
+	url = https://github.com/P-H-C/phc-winner-argon2

@@ -37,18 +37,18 @@ Desktop.ini
 .DS_Store
 
 # thirdparty build artifacts (rebuilt by build-deps.ps1)
-# Submodule sources live in thirdparty/{openssl,libssh2}/ and are tracked via .gitmodules.
+# Submodule sources live in thirdparty/{openssl,libssh2,argon2}/ and are tracked via .gitmodules.
 # Out-of-tree build dirs and downloaded tools are local-only.
 thirdparty/build/
 thirdparty/tools/
 thirdparty/build-deps.log
 build.log
 
-# Static libs produced by build-deps.ps1 from OpenSSL + libssh2 submodule sources.
+# Static libs produced by build-deps.ps1 from OpenSSL + libssh2 + argon2 submodule sources.
 # Not tracked: ~107 MB of binaries that any contributor can regenerate locally.
-# argon2_a_*.lib stays tracked (no build script in this repo for it).
 src/lib/libssh2_*.lib
 src/lib/libcrypto_*.lib
+src/lib/argon2_a_*.lib
 src/lib/ossl_static.pdb
 
 # Archiwa lokalne
