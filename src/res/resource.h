@@ -543,6 +543,7 @@
 // LAN Pair — TrustedInstaller checkbox
 // ---------------------------------------------------------------------------
 #define IDC_LAN_TI                      1108
+#define IDC_JUMP_SESSION_PICK           1109   // dropdown: pick existing session as jump host (in IDD_WEBDAV)
 #define IDS_LAN_TI                      12093
 #define IDS_LAN_TI_ERR                  12094
 #define IDS_LAN_CONNECTING              12095

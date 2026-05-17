@@ -390,6 +390,7 @@ private:
     void    OnUtf8Help();
     void    OnEditPass();
     void    OnConnectToChanged();
+    void    OnJumpSessionPicked();
 
     HWND                  m_hWnd;
     ConnectDialogContext*  m_ctx;
@@ -1585,6 +1586,51 @@ static void FillSessionCombo(HWND hWnd, LPCSTR currentSession)
         SetDlgItemText(hWnd, IDC_SESSIONCOMBO, "");
 }
 
+// Populate the jump-host session-picker dropdown. First entry is "(none)"
+// meaning manual mode (use jump_* fields, or no jump host). Then all saved
+// sessions except the quickconnect pseudo-session and the session being
+// edited (self-exclusion to prevent direct A->A reference).
+//
+// If currentRef is non-empty but not in the saved list (referenced session
+// was deleted/renamed), it is appended as "[!] <name> (missing)" so the
+// user can see and recover from the broken reference.
+static void FillJumpSessionCombo(HWND hWnd, LPCSTR currentSessionName, LPCSTR currentRef)
+{
+    SendDlgItemMessage(hWnd, IDC_JUMP_SESSION_PICK, CB_RESETCONTENT, 0, 0);
+    SendDlgItemMessage(hWnd, IDC_JUMP_SESSION_PICK, CB_ADDSTRING, 0, (LPARAM)"(none)");
+
+    bool foundRef = false;
+    std::array<char, wdirtypemax> name{};
+    SERVERHANDLE hdl = FindFirstServer(name.data(), name.size() - 1);
+    while (hdl) {
+        const bool isQuick = _stricmp(name.data(), s_quickconnect) == 0;
+        const bool isSelf  = currentSessionName && currentSessionName[0] &&
+                             _stricmp(name.data(), currentSessionName) == 0;
+        if (!isQuick && !isSelf) {
+            SendDlgItemMessage(hWnd, IDC_JUMP_SESSION_PICK, CB_ADDSTRING, 0, (LPARAM)name.data());
+            if (currentRef && currentRef[0] &&
+                _stricmp(name.data(), currentRef) == 0)
+                foundRef = true;
+        }
+        hdl = FindNextServer(hdl, name.data(), name.size() - 1);
+    }
+
+    // CBS_DROPDOWNLIST is read-only — SetDlgItemText doesn't pick an item.
+    // Use CB_SELECTSTRING to highlight the matching entry by text.
+    if (currentRef && currentRef[0] && !foundRef) {
+        // Referenced session disappeared — keep the marker visible so the
+        // user notices and can re-pick / clear.
+        std::string marker = "[!] " + std::string(currentRef) + " (missing)";
+        SendDlgItemMessage(hWnd, IDC_JUMP_SESSION_PICK, CB_ADDSTRING, 0, (LPARAM)marker.c_str());
+        SendDlgItemMessage(hWnd, IDC_JUMP_SESSION_PICK, CB_SELECTSTRING, (WPARAM)-1, (LPARAM)marker.c_str());
+    } else if (currentRef && currentRef[0]) {
+        SendDlgItemMessage(hWnd, IDC_JUMP_SESSION_PICK, CB_SELECTSTRING, (WPARAM)-1, (LPARAM)currentRef);
+    } else {
+        // Default: "(none)" — first entry, index 0
+        SendDlgItemMessage(hWnd, IDC_JUMP_SESSION_PICK, CB_SETCURSEL, 0, 0);
+    }
+}
+
 static void ApplyLoadedSessionToDialog(HWND hWnd, pConnectSettings s, LPCSTR iniFileName)
 {
     if (!s || !iniFileName)
@@ -2212,6 +2258,20 @@ INT_PTR ConnectionDialog::OnInitDialog(LPARAM /*lParam*/)
     SendDlgItemMessage(m_hWnd, IDC_DEFAULTCOMBO, CB_SETCURSEL, 0, 0);
     LoadServersFromIni(dlgIniFileName, s_quickconnect);
     FillSessionCombo(m_hWnd, strcmp(dlgDisplayName, s_quickconnect) != 0 ? dlgDisplayName : "");
+    // Populate jump-host session-picker. Skip self (the session being edited)
+    // and the quickconnect pseudo-session.
+    FillJumpSessionCombo(
+        m_hWnd,
+        strcmp(dlgDisplayName, s_quickconnect) != 0 ? dlgDisplayName : "",
+        m_settings ? m_settings->jump_session_ref.c_str() : "");
+    // Jump button is disabled while a session reference is set
+    // (ref takes priority over manual configuration via the Jump dialog).
+    {
+        const bool buttonEnabled = m_settings
+            && m_settings->use_jump_host
+            && m_settings->jump_session_ref.empty();
+        EnableWindow(GetDlgItem(m_hWnd, IDC_JUMP_BUTTON), buttonEnabled ? TRUE : FALSE);
+    }
     serverfieldchangedbyuser = false;
 
     {
@@ -2395,6 +2455,10 @@ INT_PTR ConnectionDialog::OnCommand(WPARAM wParam, LPARAM /*lParam*/)
         break;
     case IDC_JUMP_BUTTON:
         OnJumpButton();
+        break;
+    case IDC_JUMP_SESSION_PICK:
+        if (HIWORD(wParam) == CBN_SELCHANGE)
+            OnJumpSessionPicked();
         break;
     case IDC_PROXYBUTTON:
         OnProxyButton();
@@ -2663,6 +2727,11 @@ void ConnectionDialog::OnOk()
         WritePrivateProfileString(targetProfile.data(), "privkeyfile",  m_settings->privkeyfile.empty()  ? nullptr : m_settings->privkeyfile.c_str(),  dlgIniFileName);
         WritePrivateProfileString(targetProfile.data(), "useagent",     m_settings->useagent             ? "1" : nullptr, dlgIniFileName);
         WritePrivateProfileString(targetProfile.data(), "usejumphost",  m_settings->use_jump_host        ? "1" : nullptr, dlgIniFileName);
+        // jumpsessionref: when non-empty, jump host params are resolved from the
+        // referenced session at connect time, ignoring the manual jump_* fields
+        // below (which are still preserved for switching back to manual mode).
+        WritePrivateProfileString(targetProfile.data(), "jumpsessionref",
+            m_settings->jump_session_ref.empty() ? nullptr : m_settings->jump_session_ref.c_str(), dlgIniFileName);
         if (!m_settings->jump_host.empty())
             WritePrivateProfileString(targetProfile.data(), "jumphost", m_settings->jump_host.c_str(), dlgIniFileName);
         if (m_settings->jump_port && m_settings->jump_port != 22) {
@@ -2815,7 +2884,10 @@ void ConnectionDialog::OnJumpEnableChanged()
     const bool checked = IsDlgButtonChecked(m_hWnd, IDC_JUMP_ENABLE) == BST_CHECKED;
     if (m_settings)
         m_settings->use_jump_host = checked;
-    EnableWindow(GetDlgItem(m_hWnd, IDC_JUMP_BUTTON), checked ? TRUE : FALSE);
+    // Jump button is enabled only when the checkbox is on AND no session
+    // reference is set (ref takes priority over manual configuration).
+    const bool buttonEnabled = checked && (!m_settings || m_settings->jump_session_ref.empty());
+    EnableWindow(GetDlgItem(m_hWnd, IDC_JUMP_BUTTON), buttonEnabled ? TRUE : FALSE);
 }
 
 void ConnectionDialog::OnJumpButton()
@@ -2823,6 +2895,42 @@ void ConnectionDialog::OnJumpButton()
     OnJumpButtonCommand(m_hWnd, m_settings, m_ctx->displayName, m_ctx->iniFileName);
     CheckDlgButton(m_hWnd, IDC_JUMP_ENABLE,
         m_settings->use_jump_host ? BST_CHECKED : BST_UNCHECKED);
+}
+
+void ConnectionDialog::OnJumpSessionPicked()
+{
+    if (!m_settings) return;
+
+    std::array<char, wdirtypemax> selected{};
+    GetDlgItemTextA(m_hWnd, IDC_JUMP_SESSION_PICK, selected.data(), static_cast<int>(selected.size()) - 1);
+
+    const bool isNone = (selected[0] == 0 || _stricmp(selected.data(), "(none)") == 0);
+
+    if (isNone) {
+        m_settings->jump_session_ref.clear();
+    } else {
+        // Strip "[!] ... (missing)" marker if the user picked the missing entry
+        // — extract the original session name back out so we still try to use it
+        // (in case the session was just renamed and might be picked again later).
+        std::string sessionName = selected.data();
+        const std::string warnPrefix = "[!] ";
+        const std::string missingSuffix = " (missing)";
+        if (sessionName.rfind(warnPrefix, 0) == 0) {
+            sessionName.erase(0, warnPrefix.length());
+            if (sessionName.size() >= missingSuffix.size() &&
+                sessionName.compare(sessionName.size() - missingSuffix.size(),
+                                    missingSuffix.size(), missingSuffix) == 0)
+                sessionName.erase(sessionName.size() - missingSuffix.size());
+        }
+        m_settings->jump_session_ref = sessionName;
+        // Picking a session implies "use jump host" — auto-check the box.
+        m_settings->use_jump_host = true;
+        CheckDlgButton(m_hWnd, IDC_JUMP_ENABLE, BST_CHECKED);
+    }
+
+    // Refresh Jump button state based on new ref/checkbox combination.
+    const bool buttonEnabled = m_settings->use_jump_host && m_settings->jump_session_ref.empty();
+    EnableWindow(GetDlgItem(m_hWnd, IDC_JUMP_BUTTON), buttonEnabled ? TRUE : FALSE);
 }
 
 void ConnectionDialog::OnProxyButton()

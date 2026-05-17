@@ -146,6 +146,9 @@ bool LoadServerSettings(LPCSTR DisplayName, pConnectSettings ConnectResults, LPC
         ConnectResults->jump_port        = static_cast<unsigned short>(
             GetPrivateProfileInt(DisplayName, "jumpport", 22, iniFileName));
         ConnectResults->jump_useagent    = GetPrivateProfileInt(DisplayName, "jumpuseagent", 0, iniFileName) != 0;
+        std::array<char, MAX_PATH> jumpSessRef{};
+        GetPrivateProfileString(DisplayName, "jumpsessionref", "", jumpSessRef.data(), jumpSessRef.size() - 1, iniFileName);
+        ConnectResults->jump_session_ref  = jumpSessRef.data();
 
         std::array<char, 1024> jumpPass{};
         if (GetPrivateProfileString(DisplayName, "jumppassword", "", jumpPass.data(), jumpPass.size(), iniFileName)) {

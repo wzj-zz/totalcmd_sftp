@@ -148,6 +148,10 @@ struct tConnectSettings {
     std::string    jump_privkeyfile;
     bool           jump_useagent   = false;
     std::string    jump_fingerprint;   // saved MD5 hex fingerprint
+    // When non-empty, jump host params (host/port/user/password/keys/useagent)
+    // are taken from the referenced saved session at connect time, ignoring
+    // the manual jump_* fields above. Stored in INI as `jumpsessionref=<name>`.
+    std::string    jump_session_ref;
 
     // Active transport stream. Non-null when ProxyJump is in use.
     // Owned here; must be reset AFTER the target ISshSession is freed,
