@@ -601,8 +601,10 @@ int SftpConnect(pConnectSettings ConnectSettings)
             tConnectSettings refSettings{};
             if (!LoadServerSettings(ConnectSettings->jump_session_ref.c_str(),
                                     &refSettings, inifilename)) {
-                std::string msg = "Jump session '" + ConnectSettings->jump_session_ref
-                    + "' not found in saved sessions";
+                std::string msg = LngStrU8(IDS_JUMP_SESSION_NOT_FOUND,
+                    "Jump session '{}' not found in saved sessions");
+                const auto p = msg.find("{}");
+                if (p != std::string::npos) msg.replace(p, 2, ConnectSettings->jump_session_ref);
                 ShowStatus(msg.c_str());
                 if (ConnectSettings->feedback)
                     ConnectSettings->feedback->ShowError(msg, "ProxyJump");
@@ -615,10 +617,12 @@ int SftpConnect(pConnectSettings ConnectSettings)
                 !refSettings.jump_session_ref.empty()
                 || (refSettings.use_jump_host && !refSettings.jump_host.empty());
             if (refHasOwnJump) {
-                std::string msg = "Jump session '" + ConnectSettings->jump_session_ref
-                    + "' has its own jump-host configuration — chained or cyclic "
-                      "jump hosts are not supported. Pick a session that connects "
-                      "directly to the bastion.";
+                std::string msg = LngStrU8(IDS_JUMP_SESSION_CHAINED,
+                    "Jump session '{}' has its own jump-host configuration "
+                    "— chained or cyclic jump hosts are not supported. "
+                    "Pick a session that connects directly to the bastion.");
+                const auto p = msg.find("{}");
+                if (p != std::string::npos) msg.replace(p, 2, ConnectSettings->jump_session_ref);
                 ShowStatus(msg.c_str());
                 if (ConnectSettings->feedback)
                     ConnectSettings->feedback->ShowError(msg, "ProxyJump");

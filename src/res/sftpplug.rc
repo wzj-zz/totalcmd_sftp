@@ -861,6 +861,10 @@ BEGIN
     IDS_IMP_ERR_NO_WINSCP_INI    "WinSCP.ini not found in the selected folder."
     IDS_IMP_BROWSE_KITTY_FOLDER  "Select KiTTY Portable folder"
     IDS_LAN_ERR_DONOR_NO_CONNECT "LAN Pair: this machine is configured as Donor. The remote Receiver must connect here."
+    IDS_JUMP_SESSION_NONE           "(none)"
+    IDS_JUMP_SESSION_MISSING_SUFFIX " (missing)"
+    IDS_JUMP_SESSION_NOT_FOUND      "Jump session '{}' not found in saved sessions"
+    IDS_JUMP_SESSION_CHAINED        "Jump session '{}' has its own jump-host configuration — chained or cyclic jump hosts are not supported. Pick a session that connects directly to the bastion."
 END
 
 #endif    // English (United States) resources

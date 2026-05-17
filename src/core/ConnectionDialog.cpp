@@ -1594,10 +1594,41 @@ static void FillSessionCombo(HWND hWnd, LPCSTR currentSession)
 // If currentRef is non-empty but not in the saved list (referenced session
 // was deleted/renamed), it is appended as "[!] <name> (missing)" so the
 // user can see and recover from the broken reference.
+// "[!] " is a fixed visual indicator (not translated — same ASCII bang
+// across all locales). The "(none)" entry text and the " (missing)" suffix
+// ARE localized via IDS_JUMP_SESSION_NONE and IDS_JUMP_SESSION_MISSING_SUFFIX.
+static constexpr const char* kJumpMissingMarkerPrefix = "[!] ";
+
+// Read the jump-session-ref combobox text and convert it back to the bare
+// session name. Returns empty string for "(none)" or for the "[!] ... (missing)"
+// marker entry — both mean "no reference, use manual jump_* fields or none".
+// Used by both the immediate selection handler (OnJumpSessionPicked) and the
+// save-time read in OnConnectDlgOk so the model stays consistent with the UI
+// after the user changes sessions in the main IDC_SESSIONCOMBO without touching
+// this dropdown.
+static std::string ReadJumpSessionRefFromDialog(HWND hWnd)
+{
+    std::array<char, wdirtypemax> sel{};
+    GetDlgItemTextA(hWnd, IDC_JUMP_SESSION_PICK, sel.data(), static_cast<int>(sel.size()) - 1);
+    const std::string s = sel.data();
+    if (s.empty())
+        return {};
+    const std::string noneText      = LngStrU8(IDS_JUMP_SESSION_NONE, "(none)");
+    if (_stricmp(s.c_str(), noneText.c_str()) == 0)
+        return {};
+    const std::string missingSuffix = LngStrU8(IDS_JUMP_SESSION_MISSING_SUFFIX, " (missing)");
+    const bool isMissingMarker =
+        s.rfind(kJumpMissingMarkerPrefix, 0) == 0 &&
+        s.size() >= missingSuffix.size() &&
+        s.compare(s.size() - missingSuffix.size(), missingSuffix.size(), missingSuffix) == 0;
+    return isMissingMarker ? std::string() : s;
+}
+
 static void FillJumpSessionCombo(HWND hWnd, LPCSTR currentSessionName, LPCSTR currentRef)
 {
     SendDlgItemMessage(hWnd, IDC_JUMP_SESSION_PICK, CB_RESETCONTENT, 0, 0);
-    SendDlgItemMessage(hWnd, IDC_JUMP_SESSION_PICK, CB_ADDSTRING, 0, (LPARAM)"(none)");
+    const std::string noneText = LngStrU8(IDS_JUMP_SESSION_NONE, "(none)");
+    SendDlgItemMessage(hWnd, IDC_JUMP_SESSION_PICK, CB_ADDSTRING, 0, (LPARAM)noneText.c_str());
 
     bool foundRef = false;
     std::array<char, wdirtypemax> name{};
@@ -1619,14 +1650,15 @@ static void FillJumpSessionCombo(HWND hWnd, LPCSTR currentSessionName, LPCSTR cu
     // Use CB_SELECTSTRING to highlight the matching entry by text.
     if (currentRef && currentRef[0] && !foundRef) {
         // Referenced session disappeared — keep the marker visible so the
-        // user notices and can re-pick / clear.
-        std::string marker = "[!] " + std::string(currentRef) + " (missing)";
+        // user notices and can re-pick / clear it.
+        const std::string missingSuffix = LngStrU8(IDS_JUMP_SESSION_MISSING_SUFFIX, " (missing)");
+        std::string marker = kJumpMissingMarkerPrefix + std::string(currentRef) + missingSuffix;
         SendDlgItemMessage(hWnd, IDC_JUMP_SESSION_PICK, CB_ADDSTRING, 0, (LPARAM)marker.c_str());
         SendDlgItemMessage(hWnd, IDC_JUMP_SESSION_PICK, CB_SELECTSTRING, (WPARAM)-1, (LPARAM)marker.c_str());
     } else if (currentRef && currentRef[0]) {
         SendDlgItemMessage(hWnd, IDC_JUMP_SESSION_PICK, CB_SELECTSTRING, (WPARAM)-1, (LPARAM)currentRef);
     } else {
-        // Default: "(none)" — first entry, index 0
+        // Default: localized "(none)" — first entry, index 0
         SendDlgItemMessage(hWnd, IDC_JUMP_SESSION_PICK, CB_SETCURSEL, 0, 0);
     }
 }
@@ -2602,6 +2634,12 @@ void ConnectionDialog::OnOk()
     GetDlgItemText(m_hWnd, IDC_PRIVKEY, m_settings->privkeyfile);
     m_settings->useagent      = IsDlgButtonChecked(m_hWnd, IDC_USEAGENT)     == BST_CHECKED;
     m_settings->use_jump_host = IsDlgButtonChecked(m_hWnd, IDC_JUMP_ENABLE)  == BST_CHECKED;
+    // Read jump_session_ref from the picker. Needed in addition to the
+    // CBN_SELCHANGE-driven update in OnJumpSessionPicked because the user
+    // may have switched sessions in IDC_SESSIONCOMBO (which loads a different
+    // ref into the UI) without ever touching this dropdown, so the model
+    // would otherwise carry the previous ref into save.
+    m_settings->jump_session_ref = ReadJumpSessionRefFromDialog(m_hWnd);
     m_settings->php_tar                  = IsDlgButtonChecked(m_hWnd, IDC_PHP_TAR) == BST_CHECKED;
     m_settings->lan_pair_trusted_installer = IsDlgButtonChecked(m_hWnd, IDC_LAN_TI)  == BST_CHECKED;
     m_settings->detailedlog   = IsDlgButtonChecked(m_hWnd, IDC_DETAILED_LOG) == BST_CHECKED;
@@ -2810,8 +2848,17 @@ void ConnectionDialog::OnSessionChanged()
     TrimSessionName(sessionName.data());
     if (sessionName[0] && _stricmp(sessionName.data(), s_quickconnect) != 0) {
         tConnectSettings loaded{};
-        if (LoadServerSettings(sessionName.data(), &loaded, m_ctx->iniFileName))
+        if (LoadServerSettings(sessionName.data(), &loaded, m_ctx->iniFileName)) {
             ApplyLoadedSessionToDialog(m_hWnd, &loaded, m_ctx->iniFileName);
+            // Refresh jump-host picker: "self" is now the newly-loaded session
+            // (so the exclusion list shifts), and the dropdown should reflect
+            // the loaded session's own jumpsessionref. Jump button state needs
+            // to follow the loaded session's mode (manual vs ref).
+            FillJumpSessionCombo(m_hWnd, sessionName.data(), loaded.jump_session_ref.c_str());
+            const bool buttonEnabled =
+                loaded.use_jump_host && loaded.jump_session_ref.empty();
+            EnableWindow(GetDlgItem(m_hWnd, IDC_JUMP_BUTTON), buttonEnabled ? TRUE : FALSE);
+        }
     }
 }
 
@@ -2901,34 +2948,13 @@ void ConnectionDialog::OnJumpSessionPicked()
 {
     if (!m_settings) return;
 
-    std::array<char, wdirtypemax> selected{};
-    GetDlgItemTextA(m_hWnd, IDC_JUMP_SESSION_PICK, selected.data(), static_cast<int>(selected.size()) - 1);
-
-    const bool isNone = (selected[0] == 0 || _stricmp(selected.data(), "(none)") == 0);
-
-    if (isNone) {
-        m_settings->jump_session_ref.clear();
-    } else {
-        // Strip "[!] ... (missing)" marker if the user picked the missing entry
-        // — extract the original session name back out so we still try to use it
-        // (in case the session was just renamed and might be picked again later).
-        std::string sessionName = selected.data();
-        const std::string warnPrefix = "[!] ";
-        const std::string missingSuffix = " (missing)";
-        if (sessionName.rfind(warnPrefix, 0) == 0) {
-            sessionName.erase(0, warnPrefix.length());
-            if (sessionName.size() >= missingSuffix.size() &&
-                sessionName.compare(sessionName.size() - missingSuffix.size(),
-                                    missingSuffix.size(), missingSuffix) == 0)
-                sessionName.erase(sessionName.size() - missingSuffix.size());
-        }
-        m_settings->jump_session_ref = sessionName;
-        // Picking a session implies "use jump host" — auto-check the box.
+    m_settings->jump_session_ref = ReadJumpSessionRefFromDialog(m_hWnd);
+    if (!m_settings->jump_session_ref.empty()) {
+        // Picking a real session implies "use jump host" — auto-check the box.
         m_settings->use_jump_host = true;
         CheckDlgButton(m_hWnd, IDC_JUMP_ENABLE, BST_CHECKED);
     }
-
-    // Refresh Jump button state based on new ref/checkbox combination.
+    // Refresh Jump button state: enabled only when use_jump_host AND no ref.
     const bool buttonEnabled = m_settings->use_jump_host && m_settings->jump_session_ref.empty();
     EnableWindow(GetDlgItem(m_hWnd, IDC_JUMP_BUTTON), buttonEnabled ? TRUE : FALSE);
 }
