@@ -305,15 +305,89 @@ void LogMsg(LPCSTR fmt, ...) noexcept
     LogProc(PluginNumber, MSGTYPE_DETAILS, buf.data());
 }
 
+// Thread-local "current session" for ShowStatus prefix. Set via
+// SessionContextGuard at Fs*-entry points; nullptr otherwise.
+namespace {
+thread_local const tConnectSettings* g_currentSession = nullptr;
+
+// Pick the user-recognisable identifier for the session.
+// Preference order: saved name (DisplayName) → server/host → empty.
+std::string SessionPrefixA(const tConnectSettings* cs)
+{
+    if (!cs) return {};
+    const std::string& name = !cs->DisplayName.empty() ? cs->DisplayName : cs->server;
+    if (name.empty()) return {};
+    std::string out;
+    out.reserve(name.size() + 3);
+    out.append("[").append(name).append("] ");
+    return out;
+}
+
+std::wstring SessionPrefixW(const tConnectSettings* cs)
+{
+    if (!cs) return {};
+    const std::string& name = !cs->DisplayName.empty() ? cs->DisplayName : cs->server;
+    if (name.empty()) return {};
+    // Session names are typically ASCII but may carry UTF-8 if a user picked
+    // a non-Latin name. MultiByteToWideChar with CP_UTF8 covers both.
+    const int wlen = MultiByteToWideChar(CP_UTF8, 0, name.c_str(),
+                                         static_cast<int>(name.size()), nullptr, 0);
+    if (wlen <= 0) return {};
+    std::wstring w;
+    w.resize(static_cast<size_t>(wlen) + 3);
+    w[0] = L'[';
+    MultiByteToWideChar(CP_UTF8, 0, name.c_str(), static_cast<int>(name.size()),
+                        &w[1], wlen);
+    w[1 + wlen] = L']';
+    w[2 + wlen] = L' ';
+    w.resize(static_cast<size_t>(wlen) + 3);
+    return w;
+}
+} // namespace
+
+SessionContextGuard::SessionContextGuard(const tConnectSettings* cs) noexcept
+    : prev_(g_currentSession)
+{
+    g_currentSession = cs;
+}
+
+SessionContextGuard::~SessionContextGuard() noexcept
+{
+    g_currentSession = prev_;
+}
+
+const tConnectSettings* GetCurrentSession() noexcept
+{
+    return g_currentSession;
+}
+
 void ShowStatus(LPCSTR status) noexcept
 {
-    if (LogProc)
+    if (!LogProc) return;
+    const std::string prefix = SessionPrefixA(g_currentSession);
+    if (prefix.empty()) {
         LogProc(PluginNumber, MSGTYPE_DETAILS, status);
+    } else {
+        std::string full;
+        full.reserve(prefix.size() + (status ? strlen(status) : 0));
+        full.append(prefix);
+        if (status) full.append(status);
+        LogProc(PluginNumber, MSGTYPE_DETAILS, full.c_str());
+    }
 }
 
 void ShowStatusW(LPCWSTR status) noexcept
 {
-    LogProcT(PluginNumber, MSGTYPE_DETAILS, status);
+    const std::wstring prefix = SessionPrefixW(g_currentSession);
+    if (prefix.empty()) {
+        LogProcT(PluginNumber, MSGTYPE_DETAILS, status);
+    } else {
+        std::wstring full;
+        full.reserve(prefix.size() + (status ? wcslen(status) : 0));
+        full.append(prefix);
+        if (status) full.append(status);
+        LogProcT(PluginNumber, MSGTYPE_DETAILS, full.c_str());
+    }
 }
 
 // Returns true when operation should be aborted by user/progress callback.

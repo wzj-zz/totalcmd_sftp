@@ -227,6 +227,7 @@ int WINAPI FsRenMovFileW(LPCWSTR OldName, LPCWSTR NewName, BOOL Move, BOOL OverW
             return FS_FILE_NOTFOUND;
 
         ResetLastPercent(serverid1);
+        SessionContextGuard _sessionGuard(serverid1);
 
         bool isdir = (ri->Attr & FILE_ATTRIBUTE_DIRECTORY) ? true : false;
 
@@ -342,6 +343,9 @@ int WINAPI FsGetFileW(LPCWSTR RemoteName, LPWSTR LocalName, int CopyFlags, Remot
         pConnectSettings serverid = GetServerIdAndRelativePathFromPathW(RemoteName, remotedir.data(), remotedir.size() - 1);
         if (serverid == nullptr)
             return FS_FILE_READERROR;
+
+        // Prefix all ShowStatus output in this thread with "[<session>] ".
+        SessionContextGuard _sessionGuard(serverid);
 
         int startPct = 0;
         if (Resume && ri && ri->Size64 > 0) {
@@ -468,6 +472,9 @@ int WINAPI FsPutFileW(LPCWSTR LocalName, LPCWSTR RemoteName, int CopyFlags)
             return FS_FILE_READERROR;
         ResetLastPercent(serverid);
 
+        // Prefix all ShowStatus output in this thread with "[<session>] ".
+        SessionContextGuard _sessionGuard(serverid);
+
         // LAN Pair upload.
         if (IsLanPairTransport(serverid)) {
             if (!serverid->lanSession || !serverid->lanSession->isConnected())
@@ -537,6 +544,7 @@ BOOL WINAPI FsDeleteFileW(LPCWSTR RemoteName)
             if (serverid == nullptr)
                 return false;
             ResetLastPercent(serverid);
+            SessionContextGuard _sessionGuard(serverid);
             if (IsLanPairTransport(serverid)) {
                 if (!serverid->lanSession || !serverid->lanSession->isConnected()) return false;
                 return serverid->lanSession->remove(LanRemotePathToUtf8(remotedir.data()));
@@ -589,6 +597,7 @@ BOOL WINAPI FsRemoveDirW(LPCWSTR RemoteName)
             if (serverid == nullptr)
                 return false;
             ResetLastPercent(serverid);
+            SessionContextGuard _sessionGuard(serverid);
             if (IsLanPairTransport(serverid)) {
                 if (!serverid->lanSession || !serverid->lanSession->isConnected()) return false;
                 return serverid->lanSession->remove(LanRemotePathToUtf8(remotedir.data()));
@@ -626,6 +635,7 @@ BOOL WINAPI FsSetAttrW(LPCWSTR RemoteName, int NewAttr)
         if (serverid == nullptr)
             return false;
         ResetLastPercent(serverid);
+        SessionContextGuard _sessionGuard(serverid);
         // Use std::string instead of std::array<char, wdirtypemax>
         std::string remotedirA(wdirtypemax, '\0');
         walcopy(remotedirA.data(), remotedirW.data(), remotedirA.size() - 1);

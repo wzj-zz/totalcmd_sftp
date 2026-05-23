@@ -3156,6 +3156,12 @@ pConnectSettings SftpConnectToServer(LPCSTR DisplayName, LPCSTR inifilename, LPC
             return nullptr;
         }
 
+        // From here on every ShowStatus call in this thread (including all
+        // the "Connect to:", "Jump host:", "SFTP init complete" lines that
+        // SftpConnect emits) is prefixed with "[<session>] " so the user can
+        // tell which connection is logging when several are open at once.
+        SessionContextGuard _sessionGuard(&ConnectSettings);
+
         if (SftpConnect(&ConnectSettings) != SFTP_OK) {
             return nullptr;
         }

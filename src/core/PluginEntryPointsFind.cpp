@@ -190,6 +190,11 @@ HANDLE WINAPI FsFindFirstW(LPCWSTR Path, LPWIN32_FIND_DATAW FindData)
         }
         // Connection to the selected server is now established.
 
+        // From here on, every ShowStatus/ShowStatusW/ShowStatusId in this
+        // thread will be prefixed with "[<session>] " — multi-session users
+        // can tell which connection is logging "Get directory:" / etc.
+        SessionContextGuard _sessionGuard(serverid);
+
         // Guard rolls back a fresh connection on any error path below.
         // No-op when wasconnected (existing connection must not be torn down on listing failure).
         ConnectionGuard newConnGuard(wasconnected ? nullptr : serverid,
@@ -394,6 +399,7 @@ BOOL WINAPI FsMkDirW(LPCWSTR Path)
             remotedir.resize(wcslen(remotedir.data()));
             if (!serverid)
                 return false;
+            SessionContextGuard _sessionGuard(serverid);
             if (IsLanPairTransport(serverid)) {
                 if (!serverid->lanSession || !serverid->lanSession->isConnected()) return false;
                 return serverid->lanSession->mkdir(LanRemotePathToUtf8(remotedir.data()));
