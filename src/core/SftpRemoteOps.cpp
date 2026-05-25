@@ -147,6 +147,10 @@ int SftpFindFirstFileW(pConnectSettings cs, LPCWSTR remotedir, LPVOID* davdatapt
         size_t len = strlen(statusBuf.data());
         if (len < statusBuf.size() - 1)
             walcopy(statusBuf.data() + len, remotedir, static_cast<int>(statusBuf.size() - len - 1));
+        // Normalise '\' (TC's API convention) to '/' (SSH/SFTP native) so
+        // status lines for directory listings match the slash style used by
+        // ShowTransferStart for Upload/Download messages.
+        std::replace(statusBuf.begin(), statusBuf.end(), '\\', '/');
         ShowStatus(statusBuf.data());
     }
 
