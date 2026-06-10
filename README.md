@@ -927,11 +927,29 @@ third_party/
 
 `build.ps1` (project root) compiles the plugin using MSBuild with the MSVC v145 toolset. Both x64 and x86 targets are built by default and packaged together in a single ZIP.
 
+### Fresh clone setup
+
+The main repository is intentionally lightweight. Third-party dependency sources are stored as Git submodules, and the compiled dependency libraries are not committed to the repository.
+
+**Minimal setup on a new machine:**
+
+```powershell
+git clone git@github.com:wzj-zz/totalcmd_sftp.git
+cd .\totalcmd_sftp
+git submodule update --init --recursive
+```
+
+If you skip submodule initialization, the repository stays very small, but dependency rebuilds will not work because the dependency source trees are missing.
+
+### Building
+
 **Default (all languages in one binary, x64 + x86):**
 
 ```powershell
 .\build.ps1
 ```
+
+`build.ps1` checks for the required static libraries under `src\lib\`. If they are missing, it automatically invokes `build-deps.ps1` to rebuild them from the initialized submodules.
 
 **Single-language builds (smaller binary):**
 
@@ -944,6 +962,12 @@ third_party/
 ```
 
 Single-language mode strips unused RC language blocks before compile and restores them afterward. Both x64 and x86 are still built.
+
+**x64-only build:**
+
+```powershell
+.\build.ps1 -x64only
+```
 
 **Output after a successful build:**
 - `bin\SFTPplug.zip` — only file remaining in `bin\`; auto-deployed to TC plugin directory
@@ -962,19 +986,22 @@ Single-language mode strips unused RC language blocks before compile and restore
 - `SFTP_DEBUG_ENABLED=1` → `OutputDebugString` output
 - `SFTP_DEBUG_TO_FILE=0` by default; set to 1 manually for file logging to `C:\temp\sftpplug_debug.log`
 
-**Rebuilding dependency libraries (`third_party/build.ps1`):**
+**Rebuilding dependency libraries (`build-deps.ps1`):**
 
-All dependency static libs (argon2 and libssh2) can be rebuilt from source:
+All dependency static libs (Argon2, libssh2, and OpenSSL's `libcrypto`) can be rebuilt from source:
 
 ```powershell
-.\third_party\build.ps1           # Build all (argon2 + libssh2, x64 + x86)
-.\third_party\build.ps1 -argon    # argon2 only
-.\third_party\build.ps1 -libssh2  # libssh2 only
-.\third_party\build.ps1 -x64only  # x64 only
-.\third_party\build.ps1 -x86only  # x86 only
+.\build-deps.ps1
+.\build-deps.ps1 -SkipOpenSSL      # Reuse existing OpenSSL build outputs
+.\build-deps.ps1 -SkipLibssh2      # Rebuild only OpenSSL + Argon2
+.\build-deps.ps1 -SkipArgon2       # Rebuild only OpenSSL + libssh2
+.\build-deps.ps1 -X64Only          # x64 only
+.\build-deps.ps1 -Clean            # Drop thirdparty/build/ first
 ```
 
 Output libs are placed in `src\lib\` (suffixed: `argon2_a_x64.lib`, `argon2_a_x86.lib`, `libssh2_x64.lib`, `libssh2_x86.lib`). The script verifies `/MT` (`LIBCMT`) linkage in every output lib before copying.
+
+The `-Skip*` switches are optional incremental-build helpers. They do not change the default behavior. On a fresh clone, you normally do not use them unless you have already built the skipped dependency locally.
 
 ---
 
