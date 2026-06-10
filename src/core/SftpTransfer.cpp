@@ -368,6 +368,7 @@ int DownloadLoop(pConnectSettings cs, Handle& remote, LocalFile& local,
 int SftpDownloadFileW(pConnectSettings cs, LPCWSTR RemoteName, LPCWSTR LocalName,
                       bool alwaysOverwrite, int64_t filesize, LPFILETIME ft, bool Resume)
 {
+    ScopedSshSessionUse _sessionUse(cs);
     if (!cs) return SFTP_FAILED;
     if (IsPhpAgentTransport(cs))
         return PhpAgentDownloadFileW(cs, RemoteName, LocalName, alwaysOverwrite, filesize, Resume);
@@ -480,6 +481,7 @@ int SftpDownloadFileW(pConnectSettings cs, LPCWSTR RemoteName, LPCWSTR LocalName
 int SftpUploadFileW(pConnectSettings cs, LPCWSTR LocalName, LPCWSTR RemoteName,
                     bool Resume, bool setattr)
 {
+    ScopedSshSessionUse _sessionUse(cs);
     if (!cs) return SFTP_FAILED;
     if (IsPhpAgentTransport(cs))
         return PhpAgentUploadFileW(cs, LocalName, RemoteName, Resume);

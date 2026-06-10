@@ -24,10 +24,14 @@
 #include "SshBackendFactory.h"
 #include "WindowsUserFeedback.h"
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <condition_variable>
+#include <mutex>
 #include <new>
 #include <fstream>
 #include <iterator>
+#include <thread>
 #include <vector>
 #include "SessionImport.h"
 #include "PhpAgentClient.h"
@@ -55,10 +59,49 @@
 // Global SSH backend instance (created once, never changes)
 static std::unique_ptr<ISshBackend> g_sshBackend;
 
+struct SshKeepAliveState {
+    std::recursive_mutex sessionMutex;
+    std::mutex workerMutex;
+    std::condition_variable workerCv;
+    std::thread worker;
+    std::atomic<bool> stop{ false };
+    pConnectSettings owner = nullptr;
+};
+
 // Global LAN Pair file server: started at plugin init, serves all authenticated peers.
 // Also the discovery service that announces this machine's presence.
 static std::unique_ptr<LanFileServer>    g_lanFileServer;
 static std::unique_ptr<lanpair::DiscoveryService> g_lanDiscovery;
+
+static void SshKeepAliveWorker(const std::shared_ptr<SshKeepAliveState>& state)
+{
+    while (!state->stop.load(std::memory_order_acquire)) {
+        std::unique_lock<std::mutex> workerLock(state->workerMutex);
+        state->workerCv.wait_for(workerLock, std::chrono::milliseconds(SSH_KEEPALIVE_WAKE_MS), [&] {
+            return state->stop.load(std::memory_order_acquire);
+        });
+        workerLock.unlock();
+
+        if (state->stop.load(std::memory_order_acquire))
+            break;
+
+        pConnectSettings cs = state->owner;
+        if (!cs || !cs->session || IsLanPairTransport(cs) || IsPhpAgentTransport(cs))
+            continue;
+        if (!state->sessionMutex.try_lock())
+            continue;
+
+        int rc = LIBSSH2_ERROR_NONE;
+        int secondsToNext = 0;
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            rc = cs->session->keepaliveSend(&secondsToNext);
+            if (rc != LIBSSH2_ERROR_EAGAIN)
+                break;
+            WaitForSshIo(cs, SOCKET_POLL_MS);
+        }
+        state->sessionMutex.unlock();
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Connection progress step percentages
@@ -246,6 +289,59 @@ void EnableSocketKeepAlive(SOCKET s) noexcept
                  &bytesReturned, nullptr, nullptr) != 0) {
         CONN_LOG("Tune TCP keepalive failed: WSA=%d", WSAGetLastError());
     }
+}
+
+void StartSshKeepAlive(pConnectSettings cs) noexcept
+{
+    if (!cs || !cs->session || IsLanPairTransport(cs) || IsPhpAgentTransport(cs))
+        return;
+
+    if (!cs->sshKeepAlive)
+        cs->sshKeepAlive = std::make_shared<SshKeepAliveState>();
+
+    auto state = cs->sshKeepAlive;
+    {
+        std::lock_guard<std::mutex> lock(state->workerMutex);
+        state->owner = cs;
+        state->stop.store(false, std::memory_order_release);
+        if (state->worker.joinable())
+            return;
+    }
+
+    state->worker = std::thread([state] {
+        SshKeepAliveWorker(state);
+    });
+}
+
+void StopSshKeepAlive(pConnectSettings cs) noexcept
+{
+    if (!cs || !cs->sshKeepAlive)
+        return;
+
+    auto state = cs->sshKeepAlive;
+    {
+        std::lock_guard<std::mutex> lock(state->workerMutex);
+        state->owner = nullptr;
+        state->stop.store(true, std::memory_order_release);
+    }
+    state->workerCv.notify_all();
+    if (state->worker.joinable())
+        state->worker.join();
+    cs->sshKeepAlive.reset();
+}
+
+void EnterSshSessionUse(pConnectSettings cs) noexcept
+{
+    if (!cs || !cs->sshKeepAlive)
+        return;
+    cs->sshKeepAlive->sessionMutex.lock();
+}
+
+void LeaveSshSessionUse(pConnectSettings cs) noexcept
+{
+    if (!cs || !cs->sshKeepAlive)
+        return;
+    cs->sshKeepAlive->sessionMutex.unlock();
 }
 
 bool IsSocketError(SOCKET s)
@@ -554,6 +650,7 @@ static int LanPairConnect(pConnectSettings cs)
 
 int SftpConnect(pConnectSettings ConnectSettings)
 {
+    ScopedSshSessionUse _sessionUse(ConnectSettings);
     int hr = 0;
     if (IsLanPairTransport(ConnectSettings)) {
         return LanPairConnect(ConnectSettings);
@@ -771,6 +868,9 @@ int SftpConnect(pConnectSettings ConnectSettings)
     if (ProgressProc(PluginNumber, buf.data(), "-", progress))
         return fail(SFTP_FAILED);
 
+    if (ConnectSettings->sshKeepAlive)
+        StartSshKeepAlive(ConnectSettings);
+
     CONN_LOG("SftpConnect success");
     return SFTP_OK;
 }
@@ -810,6 +910,7 @@ bool SftpConfigureServer(LPCSTR DisplayName, LPCSTR inifilename)
 
 int SftpCloseConnection(pConnectSettings ConnectSettings)
 {
+    ScopedSshSessionUse _sessionUse(ConnectSettings);
     if (!ConnectSettings)
         return SFTP_FAILED;
 
@@ -873,6 +974,7 @@ int SftpCloseConnection(pConnectSettings ConnectSettings)
 
 bool ReconnectSFTPChannelIfNeeded(pConnectSettings ConnectSettings)
 {
+    ScopedSshSessionUse _sessionUse(ConnectSettings);
     if (IsLanPairTransport(ConnectSettings))
         return ConnectSettings->lanSession && ConnectSettings->lanSession->isConnected();
     if (IsPhpAgentTransport(ConnectSettings))

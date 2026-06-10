@@ -474,6 +474,7 @@ int SftpQuoteCommand2(pConnectSettings cs, const char* remotedir, const char* cm
                       char* reply, size_t replylen,
                       DWORD idleTimeoutMs, DWORD totalTimeoutMs)
 {
+    ScopedSshSessionUse _sessionUse(cs);
     if (reply && replylen > 0)
         reply[0] = '\0';
 
@@ -567,6 +568,7 @@ int SftpQuoteCommand2(pConnectSettings cs, const char* remotedir, const char* cm
 int SftpQuoteCommand2W(pConnectSettings cs, LPCWSTR remotedir, LPCWSTR cmd,
                        char* reply, size_t replylen)
 {
+    ScopedSshSessionUse _sessionUse(cs);
     if (reply && replylen > 0)
         reply[0] = '\0';
 

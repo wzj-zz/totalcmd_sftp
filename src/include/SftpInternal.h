@@ -68,6 +68,8 @@ static constexpr DWORD SOCKET_READ_POLL_MS      = 1000;
 static constexpr DWORD DIRECTORY_IO_POLL_MS     = 100;
 static constexpr DWORD TCP_KEEPALIVE_IDLE_MS    = 60000;
 static constexpr DWORD TCP_KEEPALIVE_INTERVAL_MS = 30000;
+static constexpr unsigned SSH_KEEPALIVE_INTERVAL_SEC = 60;
+static constexpr DWORD SSH_KEEPALIVE_WAKE_MS = 15000;
 static constexpr DWORD PROGRESS_UPDATE_MS       = 100;
 
 // Reconnect timeout (used by ReconnectSFTPChannelIfNeeded). Disconnect itself
@@ -118,12 +120,28 @@ void  ShowError(LPCSTR error);
 // Socket helpers (defined in SftpConnection.cpp)
 void  SetBlockingSocket(SOCKET s, bool blocking);
 void  EnableSocketKeepAlive(SOCKET s) noexcept;
+void  StartSshKeepAlive(pConnectSettings cs) noexcept;
+void  StopSshKeepAlive(pConnectSettings cs) noexcept;
+void  EnterSshSessionUse(pConnectSettings cs) noexcept;
+void  LeaveSshSessionUse(pConnectSettings cs) noexcept;
 bool  IsSocketError(SOCKET s);
 bool  IsSocketDisconnected(SOCKET s);
 bool  IsSocketWritable(SOCKET s);
 bool  IsSocketReadable(SOCKET s);
 bool  WaitForTransportReadable(pConnectSettings cs);
 bool  WaitForSshIo(pConnectSettings cs, DWORD timeoutMs = SOCKET_READ_POLL_MS);
+
+class ScopedSshSessionUse {
+public:
+    explicit ScopedSshSessionUse(pConnectSettings cs) noexcept : cs_(cs) { EnterSshSessionUse(cs_); }
+    ~ScopedSshSessionUse() noexcept { LeaveSshSessionUse(cs_); }
+
+    ScopedSshSessionUse(const ScopedSshSessionUse&) = delete;
+    ScopedSshSessionUse& operator=(const ScopedSshSessionUse&) = delete;
+
+private:
+    pConnectSettings cs_;
+};
 
 // Generic EAGAIN-loop wrapper. Retries op() until it returns non-EAGAIN,
 // timeout elapses, or Esc is pressed. Between attempts waits on the SSH

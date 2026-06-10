@@ -343,6 +343,16 @@ int Libssh2Session::startup(int sock)
     return libssh2_session_startup(session_, sock);
 }
 
+void Libssh2Session::keepaliveConfig(int wantReply, unsigned interval)
+{
+    libssh2_keepalive_config(session_, wantReply, interval);
+}
+
+int Libssh2Session::keepaliveSend(int* secondsToNext)
+{
+    return libssh2_keepalive_send(session_, secondsToNext);
+}
+
 void Libssh2Session::setBlocking(int blocking)
 {
     libssh2_session_set_blocking(session_, blocking);

@@ -119,6 +119,8 @@ public:
     ~Libssh2Session() override;
 
     int startup(int sock) override;
+    void keepaliveConfig(int wantReply, unsigned interval) override;
+    int keepaliveSend(int* secondsToNext) override;
     void setBlocking(int blocking) override;
     int getBlocking() override;
     int disconnect(const char* desc) override;

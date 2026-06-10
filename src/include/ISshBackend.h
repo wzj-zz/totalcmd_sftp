@@ -111,6 +111,8 @@ struct ISshSession {
     virtual ~ISshSession() = default;
 
     virtual int startup(int sock) = 0;
+    virtual void keepaliveConfig(int wantReply, unsigned interval) = 0;
+    virtual int keepaliveSend(int* secondsToNext) = 0;
     virtual void setBlocking(int blocking) = 0;
     virtual int getBlocking() = 0;
     virtual int disconnect(const char* desc) = 0;

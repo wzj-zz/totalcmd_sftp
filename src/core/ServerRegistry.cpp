@@ -107,6 +107,7 @@ bool SetServerIdForName(LPCSTR name, SERVERID id) noexcept
     
     if (old_cs) {
         SftpCloseConnection(old_cs);
+        StopSshKeepAlive(old_cs);
         delete old_cs;
     }
     
@@ -264,6 +265,7 @@ void FreeServerList() noexcept
     }
     for (auto cs : to_close) {
         SftpCloseConnection(cs);
+        StopSshKeepAlive(cs);
         delete cs;
     }
 }
@@ -332,4 +334,3 @@ void FindCloseServer(SERVERHANDLE searchhandle) noexcept
         delete ctx;
     }
 }
-

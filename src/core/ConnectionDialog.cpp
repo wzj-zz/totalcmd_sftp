@@ -3188,6 +3188,7 @@ pConnectSettings SftpConnectToServer(LPCSTR DisplayName, LPCSTR inifilename, LPC
                 auto* heap_cs = new tConnectSettings(std::move(ConnectSettings));
                 if (heap_cs->session)
                     *heap_cs->session->abstractPtr() = heap_cs;
+                StartSshKeepAlive(heap_cs);
                 return heap_cs;
             } catch (const std::bad_alloc&) {
                 if (ConnectSettings.feedback) {

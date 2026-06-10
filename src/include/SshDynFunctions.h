@@ -5,6 +5,8 @@ FUNCDEF(LIBSSH2_API void **,libssh2_session_abstract,(LIBSSH2_SESSION *session))
 FUNCDEF(LIBSSH2_API void *,libssh2_session_callback_set,(LIBSSH2_SESSION *session, int cbtype, void *callback));
 FUNCDEF(LIBSSH2_API int ,libssh2_banner_set,(LIBSSH2_SESSION *session, const char *banner));
 FUNCDEF(LIBSSH2_API int ,libssh2_session_startup,(LIBSSH2_SESSION *session, int sock));
+FUNCDEF(LIBSSH2_API void ,libssh2_keepalive_config,(LIBSSH2_SESSION *session, int want_reply, unsigned int interval));
+FUNCDEF(LIBSSH2_API int ,libssh2_keepalive_send,(LIBSSH2_SESSION *session, int *seconds_to_next));
 FUNCDEF(LIBSSH2_API int ,libssh2_session_disconnect_ex,(LIBSSH2_SESSION *session, int reason, const char *description, const char *lang));
 FUNCDEF(LIBSSH2_API int ,libssh2_session_free,(LIBSSH2_SESSION *session));
 FUNCDEF(LIBSSH2_API const char *,libssh2_hostkey_hash,(LIBSSH2_SESSION *session, int hash_type));
@@ -98,4 +100,3 @@ FUNCDEF2(LIBSSH2_API int, libssh2_agent_disconnect,(LIBSSH2_AGENT *agent));
 FUNCDEF2(LIBSSH2_API void, libssh2_agent_free,(LIBSSH2_AGENT *agent));
 
 #endif
-

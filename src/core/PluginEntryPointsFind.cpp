@@ -39,6 +39,7 @@ public:
             SetServerIdForName(name_.c_str(), nullptr);
         else {
             SftpCloseConnection(cs_);
+            StopSshKeepAlive(cs_);
             delete cs_;
         }
     }

@@ -63,6 +63,8 @@ struct scp_opendir_data {
     HANDLE tempfile;
 };
 
+struct SshKeepAliveState;
+
 struct tConnectSettings {
     std::string DisplayName;
     std::string IniFileName;
@@ -161,6 +163,7 @@ struct tConnectSettings {
     WCHAR current_sourceW[wdirtypemax];
     WCHAR current_targetW[wdirtypemax];
     std::unique_ptr<IUserFeedback> feedback;
+    std::shared_ptr<SshKeepAliveState> sshKeepAlive;
 };
 
 using pConnectSettings = tConnectSettings*;

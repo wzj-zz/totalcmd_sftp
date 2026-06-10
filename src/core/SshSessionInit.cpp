@@ -157,6 +157,7 @@ int InitializeSshSession(
         }
         return -70;
     }
+    ConnectSettings->session->keepaliveConfig(1, SSH_KEEPALIVE_INTERVAL_SEC);
     SftpLogLastError("libssh2_session_startup: ", ConnectSettings->session->lastErrno());
     return 0;
 }

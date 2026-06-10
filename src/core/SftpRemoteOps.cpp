@@ -359,6 +359,7 @@ bool ParseScpListingLine(pConnectSettings cs, const char* line, WIN32_FIND_DATAW
 
 int SftpFindFirstFileW(pConnectSettings cs, LPCWSTR remotedir, LPVOID* davdataptr)
 {
+    ScopedSshSessionUse _sessionUse(cs);
     {
         std::array<char, wdirtypemax> statusBuf{};
         LoadStr(statusBuf, IDS_GET_DIR);
@@ -598,6 +599,7 @@ int SftpFindFirstFileW(pConnectSettings cs, LPCWSTR remotedir, LPVOID* davdatapt
 
 int SftpFindNextFileW(pConnectSettings cs, LPVOID davdataptr, LPWIN32_FIND_DATAW FindData) noexcept
 {
+    ScopedSshSessionUse _sessionUse(cs);
     ScpData* scpd = AsScpData(davdataptr);
     if (scpd && scpd->listingState) {
         if (scpd->listingState->nextIndex >= scpd->listingState->entries.size())
@@ -673,6 +675,7 @@ int SftpFindNextFileW(pConnectSettings cs, LPVOID davdataptr, LPWIN32_FIND_DATAW
 
 int SftpFindClose(pConnectSettings cs, LPVOID davdataptr)
 {
+    ScopedSshSessionUse _sessionUse(cs);
     ScpData* scpd = AsScpData(davdataptr);
     if (scpd) {
         delete scpd;
@@ -708,6 +711,7 @@ int SftpFindClose(pConnectSettings cs, LPVOID davdataptr)
 
 int SftpCreateDirectoryW(pConnectSettings cs, LPCWSTR Path)
 {
+    ScopedSshSessionUse _sessionUse(cs);
     std::array<char, MAX_PATH> msgBuf{};
     LoadStr(msgBuf, IDS_MK_DIR);
     std::wstring display(wdirtypemax, L'\0');
@@ -790,6 +794,7 @@ int SftpCreateDirectoryW(pConnectSettings cs, LPCWSTR Path)
 
 int SftpDeleteFileW(pConnectSettings cs, LPCWSTR RemoteName, bool isdir)
 {
+    ScopedSshSessionUse _sessionUse(cs);
     std::array<char, MAX_PATH> msgBuf{};
     LoadStr(msgBuf, IDS_DELETE);
     std::wstring display(wdirtypemax, L'\0');
@@ -884,6 +889,7 @@ int SftpDeleteFileW(pConnectSettings cs, LPCWSTR RemoteName, bool isdir)
 
 int SftpRenameMoveFileW(pConnectSettings cs, LPCWSTR OldName, LPCWSTR NewName, bool Move, bool Overwrite, [[maybe_unused]] bool isdir)
 {
+    ScopedSshSessionUse _sessionUse(cs);
     if (!cs)
         return SFTP_FAILED;
 
@@ -928,6 +934,7 @@ int SftpRenameMoveFileW(pConnectSettings cs, LPCWSTR OldName, LPCWSTR NewName, b
 
 int SftpSetAttr(pConnectSettings cs, LPCSTR RemoteName, int NewAttr)
 {
+    ScopedSshSessionUse _sessionUse(cs);
     if (!cs || !RemoteName || !RemoteName[0])
         return SFTP_FAILED;
     if (cs->scponly || IsPhpAgentTransport(cs))
@@ -970,6 +977,7 @@ int SftpSetAttr(pConnectSettings cs, LPCSTR RemoteName, int NewAttr)
 
 int SftpSetDateTimeW(pConnectSettings cs, LPCWSTR RemoteName, LPFILETIME LastWriteTime)
 {
+    ScopedSshSessionUse _sessionUse(cs);
     if (!cs || !RemoteName || !LastWriteTime || cs->scponly || IsPhpAgentTransport(cs))
         return SFTP_FAILED;
 
@@ -1015,6 +1023,7 @@ bool SftpChmodW(pConnectSettings cs, LPCWSTR RemoteName, LPCWSTR chmod)
 
 bool SftpLinkFolderTargetW(pConnectSettings cs, LPWSTR RemoteName, size_t maxlen)
 {
+    ScopedSshSessionUse _sessionUse(cs);
     if (!cs || !RemoteName || maxlen < 2)
         return false;
 
@@ -1189,6 +1198,7 @@ int SftpServerSupportsChecksumsW(pConnectSettings ConnectSettings, LPCWSTR Remot
 
 HANDLE SftpStartFileChecksumW(int ChecksumType, pConnectSettings ConnectSettings, LPCWSTR RemoteName)
 {
+    ScopedSshSessionUse _sessionUse(ConnectSettings);
     if (!ConnectSettings || !RemoteName)
         return nullptr;
     if (!(ChecksumType == FS_CHK_MD5 || ChecksumType == FS_CHK_SHA1 ||
