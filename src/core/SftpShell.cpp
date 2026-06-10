@@ -168,7 +168,7 @@ std::unique_ptr<ISshChannel> ConnectChannel(ISshSession* session, SOCKET sock)
             break;
 
         if (sock != INVALID_SOCKET)
-            IsSocketReadable(sock);
+            IsSocketReadable(sock, DIRECTORY_IO_POLL_MS);
         else
             Sleep(50);
     } while (!channel);
@@ -243,7 +243,7 @@ bool GetChannelCommandReply(ISshSession* session, ISshChannel* channel, const ch
             if (elapsed > kChannelReplyTimeoutMs)
                 break;
             if (sock != INVALID_SOCKET)
-                IsSocketReadable(sock);
+                IsSocketReadable(sock, DIRECTORY_IO_POLL_MS);
             else
                 Sleep(50);
         } else if (rc < 0 && errRc < 0 && rc != LIBSSH2_ERROR_EAGAIN && errRc != LIBSSH2_ERROR_EAGAIN) {
@@ -259,7 +259,7 @@ bool GetChannelCommandReply(ISshSession* session, ISshChannel* channel, const ch
         if (elapsed > kChannelExitStatusWaitMs)
             break;
         if (sock != INVALID_SOCKET)
-            IsSocketReadable(sock);
+            IsSocketReadable(sock, DIRECTORY_IO_POLL_MS);
         else
             Sleep(50);
     }
@@ -450,7 +450,7 @@ bool ReadChannelLine(ISshChannel* channel, char* line, size_t lineLen,
         if (rc == LIBSSH2_ERROR_EAGAIN || rc == 0) {
             ++consecutiveEagain;
             if (sock != INVALID_SOCKET)
-                IsSocketReadable(sock);
+                IsSocketReadable(sock, DIRECTORY_IO_POLL_MS);
             else
                 Sleep(consecutiveEagain > 20 ? 200 : 50);
         }

@@ -359,7 +359,7 @@ bool IsSocketDisconnected(SOCKET s)
         return true;
     if (IsSocketError(s))
         return true;
-    if (!IsSocketReadable(s))
+    if (!IsSocketReadable(s, SOCKET_POLL_MS))
         return false;
 
     char ch = 0;
@@ -382,15 +382,20 @@ bool IsSocketWritable(SOCKET s)
     return 1 == select(0, nullptr, &fds, nullptr, &timeout);
 }
 
-bool IsSocketReadable(SOCKET s)
+bool IsSocketReadable(SOCKET s, DWORD timeoutMs)
 {
     fd_set fds;
     // Wingate local requires a non-zero timeout in select().
-    timeval timeout = gettimeval(SOCKET_READ_POLL_MS);
+    timeval timeout = gettimeval(timeoutMs);
     FD_ZERO(&fds);
     FD_SET(s, &fds);
     int err = select(0, &fds, nullptr, nullptr, &timeout);
     return (err == 1);
+}
+
+bool IsSocketReadable(SOCKET s)
+{
+    return IsSocketReadable(s, SOCKET_READ_POLL_MS);
 }
 
 bool WaitForTransportReadable(pConnectSettings cs)

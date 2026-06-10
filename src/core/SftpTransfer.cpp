@@ -120,7 +120,7 @@ std::unique_ptr<ISftpHandle> OpenSftpFileWithRetry(
             ShowStatusId(IDS_LOG_SFTP_OPEN_TIMEOUT, nullptr, true);
             break;
         }
-        IsSocketReadable(cs->sock);
+        WaitForSshIo(cs, DIRECTORY_IO_POLL_MS);
     } while (!handle);
     return handle;
 }
@@ -578,7 +578,7 @@ int SftpUploadFileW(pConnectSettings cs, LPCWSTR LocalName, LPCWSTR RemoteName,
                     do {
                         verifyRc = cs->sftpsession->stat(remotePath.c_str(), &verifyAttr);
                         if (verifyRc == LIBSSH2_ERROR_EAGAIN)
-                            IsSocketReadable(cs->sock);
+                            WaitForSshIo(cs, DIRECTORY_IO_POLL_MS);
                     } while (verifyRc == LIBSSH2_ERROR_EAGAIN);
                     if (verifyRc == 0)
                         return SFTP_OK;
@@ -615,7 +615,7 @@ int SftpUploadFileW(pConnectSettings cs, LPCWSTR LocalName, LPCWSTR RemoteName,
             do {
                 rc = sftpHandle->fstat(&attr, 0);
                 if (rc == LIBSSH2_ERROR_EAGAIN)
-                    IsSocketReadable(cs->sock);
+                    WaitForSshIo(cs, DIRECTORY_IO_POLL_MS);
             } while (rc == LIBSSH2_ERROR_EAGAIN);
             // Check if server actually returned size (some servers may not honor the flag)
             if (rc == 0 && (attr.flags & LIBSSH2_SFTP_ATTR_SIZE) && attr.filesize > 0) {

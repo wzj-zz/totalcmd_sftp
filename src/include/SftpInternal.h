@@ -127,6 +127,7 @@ void  LeaveSshSessionUse(pConnectSettings cs) noexcept;
 bool  IsSocketError(SOCKET s);
 bool  IsSocketDisconnected(SOCKET s);
 bool  IsSocketWritable(SOCKET s);
+bool  IsSocketReadable(SOCKET s, DWORD timeoutMs);
 bool  IsSocketReadable(SOCKET s);
 bool  WaitForTransportReadable(pConnectSettings cs);
 bool  WaitForSshIo(pConnectSettings cs, DWORD timeoutMs = SOCKET_READ_POLL_MS);
