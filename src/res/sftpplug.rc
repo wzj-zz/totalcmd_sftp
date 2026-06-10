@@ -1,0 +1,879 @@
+// Microsoft Visual C++ generated resource script.
+//
+#include "resource.h"
+#include "..\\include\\version.h"
+#include <winresrc.h>
+#ifndef IDC_STATIC
+#define IDC_STATIC -1
+#endif
+
+/////////////////////////////////////////////////////////////////////////////
+// English (United States) resources
+
+#if !defined(AFX_RESOURCE_DLL) || defined(AFX_TARG_ENU)
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+#pragma code_page(65001)
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Dialog
+//
+
+IDD_WEBDAV DIALOGEX 0, 0, 315, 320
+STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
+EXSTYLE WS_EX_NOPARENTNOTIFY
+CAPTION "Connect to SFTP Server"
+FONT 8, "MS Shell Dlg", 0, 0, 0x1
+BEGIN
+    LTEXT           "&Connect to: (server/path or server:port/path)",IDC_LABEL_CONNECTTO,5,5,207,8
+    CONTROL         "Auto",IDC_PROTOAUTO,"Button",BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP,215,5,27,10
+    CONTROL         "IPv4",IDC_PROTOV4,"Button",BS_AUTORADIOBUTTON,247,5,31,10
+    CONTROL         "IPv6",IDC_PROTOV6,"Button",BS_AUTORADIOBUTTON,279,5,31,10
+    EDITTEXT        IDC_CONNECTTO,5,15,305,12,ES_AUTOHSCROLL
+    LTEXT           "&User name:",IDC_LABEL_USERNAME,5,31,295,8
+    EDITTEXT        IDC_USERNAME,5,42,305,12,ES_AUTOHSCROLL
+    LTEXT           "&Password:",IDC_PASSLABEL,5,58,54,8
+    PUSHBUTTON      "?",IDC_PASSWORDHELP,43,57,12,10
+    CONTROL         "Use SSH agent (Pageant)",IDC_USEAGENT,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,170,58,135,8
+    PUSHBUTTON      "Change password...",IDC_EDITPASS,5,71,305,14,NOT WS_VISIBLE
+    EDITTEXT        IDC_PASSWORD,5,68,305,12,ES_PASSWORD | ES_AUTOHSCROLL
+    CONTROL         "Protect password with password manager (TC>=7.5)",IDC_CRYPTPASS,
+                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,5,82,305,10
+    GROUPBOX        "Client certificate for &authentication:",IDC_LABEL_CERTGROUP,5,92,305,60
+    LTEXT           "Public key file (*.pub):",IDC_STATICPUB,10,103,269,8
+    EDITTEXT        IDC_PUBKEY,10,112,261,12,ES_AUTOHSCROLL
+    PUSHBUTTON      "?",IDC_CERTHELP,275,112,12,12
+    PUSHBUTTON      ">>",IDC_LOADPUBKEY,289,112,16,12
+    LTEXT           "Private key file (*.pem;*.ppk):",IDC_STATICPEM,10,126,282,8
+    EDITTEXT        IDC_PRIVKEY,10,136,261,12,ES_AUTOHSCROLL
+    PUSHBUTTON      "?",IDC_CERTHELPPRIV,275,136,12,12
+    PUSHBUTTON      ">>",IDC_LOADPRIVKEY,289,136,16,12
+    CONTROL         "Compress with &ZLIB (may fail on some servers)",IDC_COMPRESS,
+                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,5,152,305,10
+    CONTROL         "Log full directory listings (&debug)",IDC_DETAILED_LOG,
+                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,5,162,305,10
+    CONTROL         "Use shell transfer (blocked hosts)",IDC_SHELLTRANSFER,
+                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,5,172,192,10
+    CONTROL         "Use SCP for data transfers (faster!)",IDC_SCP_DATA,
+                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,5,182,191,10
+    CONTROL         "Use SCP for everything (no SFTP)",IDC_SCP_ALL,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,5,192,167,10
+    LTEXT           "Transfer:",IDC_LABEL_TRANSFER,200,176,40,8
+    COMBOBOX        IDC_TRANSFERMODE,234,173,76,46,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "System:",IDC_SYSTEMLABEL,200,187,40,8
+    COMBOBOX        IDC_SYSTEM,234,185,76,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    CONTROL         "Encoding (codepage) of file names:",IDC_CODEPAGELABEL,
+                    "Static",SS_SIMPLE | WS_GROUP,5,202,169,8
+    COMBOBOX        IDC_UTF8,234,199,76,127,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "?",IDC_UTF8HELP,218,200,12,10
+    GROUPBOX        " User &rights of newly created files/directories: ",IDC_PERMISSIONS_GROUP,5,212,295,26,WS_GROUP
+    CONTROL         "New files (Upload):",IDC_FILEMOD_LABEL,"Static",SS_SIMPLE | WS_GROUP,13,224,70,8
+    EDITTEXT        IDC_FILEMOD,87,222,28,12,ES_AUTOHSCROLL | ES_NUMBER
+    LTEXT           "New folders:",IDC_DIRMOD_LABEL,160,224,47,8
+    EDITTEXT        IDC_DIRMOD,210,222,28,12,ES_AUTOHSCROLL | ES_NUMBER
+    GROUPBOX        " LAN Pair Session: ",IDC_LANPAIR_GROUP,5,212,295,26,NOT WS_VISIBLE | WS_GROUP
+    LTEXT           "Session timeout (min):",IDC_LAN_TIMEOUT_LABEL,13,224,80,8,NOT WS_VISIBLE
+    EDITTEXT        IDC_LAN_TIMEOUT,95,222,15,12,ES_AUTOHSCROLL | ES_NUMBER | NOT WS_VISIBLE
+    LTEXT           "(0=no limit)",IDC_LAN_TIMEOUT_HINT,130,224,50,8,NOT WS_VISIBLE
+    CONTROL         "TrustedInstaller",IDC_LAN_TI,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,185,224,105,8,NOT WS_VISIBLE
+    LTEXT           "Session:",IDC_LABEL_SESSION,5,241,30,8
+    COMBOBOX        IDC_SESSIONCOMBO,38,239,227,120,CBS_DROPDOWN | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "Shell...",IDC_PHPSHELL,270,238,40,14
+    LTEXT           "Jump host:",IDC_LABEL_JUMPHOST_GRP,5,257,42,8
+    CONTROL         "Use &jump host",IDC_JUMP_ENABLE,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,49,257,104,8
+    PUSHBUTTON      "Jump...",IDC_JUMP_BUTTON,224,255,40,14
+    CONTROL         "TAR",IDC_PHP_TAR,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,242,224,60,8
+    LTEXT           "Proxy settings:",IDC_LABEL_PROXY_SETTINGS,5,273,295,8
+    COMBOBOX        IDC_PROXYCOMBO,5,283,282,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      ">>",IDC_PROXYBUTTON,290,282,20,14
+    PUSHBUTTON      "Delete last proxy",IDC_DELETELAST,5,301,105,14
+    PUSHBUTTON      "Import...",IDC_IMPORTSESSIONS,113,301,70,14
+    PUSHBUTTON      "Help",IDC_PLUGINHELP,186,301,40,14
+    DEFPUSHBUTTON   "OK",IDOK,229,301,26,14
+    PUSHBUTTON      "Cancel",IDCANCEL,258,301,50,14
+END
+
+IDD_PROPERTIES DIALOGEX 0, 0, 249, 214
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Properties"
+FONT 8, "MS Shell Dlg", 0, 0, 0x1
+BEGIN
+    DEFPUSHBUTTON   "OK",IDOK,123,193,50,14
+    PUSHBUTTON      "Cancel",IDCANCEL,192,193,50,14
+    GROUPBOX        "File properties",IDC_STATIC,7,7,235,93
+    LTEXT           "Name:",IDC_STATIC,16,20,22,8
+    LTEXT           "Owner:",IDC_STATIC,16,33,24,8
+    LTEXT           "Group:",IDC_STATIC,16,46,22,8
+    LTEXT           "Permissions:",IDC_STATIC,16,59,40,8
+    LTEXT           "Size:",IDC_STATIC,16,72,16,8
+    LTEXT           "Last modified:",IDC_STATIC,16,85,44,8
+    EDITTEXT        IDC_PROP_NAME,72,20,164,12,ES_AUTOHSCROLL | ES_READONLY | NOT WS_BORDER
+    EDITTEXT        IDC_PROP_OWNER,72,33,164,12,ES_AUTOHSCROLL | ES_READONLY | NOT WS_BORDER
+    EDITTEXT        IDC_PROP_GROUP,72,46,164,12,ES_AUTOHSCROLL | ES_READONLY | NOT WS_BORDER
+    EDITTEXT        IDC_PROP_PERMISSIONS,72,59,164,12,ES_AUTOHSCROLL | ES_READONLY | NOT WS_BORDER
+    EDITTEXT        IDC_PROP_SIZE,72,72,164,12,ES_AUTOHSCROLL | ES_READONLY | NOT WS_BORDER
+    EDITTEXT        IDC_PROP_MODIFIED,72,85,164,12,ES_AUTOHSCROLL | ES_READONLY | NOT WS_BORDER
+    GROUPBOX        " Raw STAT reply",IDC_STATIC,7,103,235,88
+    EDITTEXT        IDC_PROP_RAWSTAT,15,113,220,73,ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL | ES_READONLY | NOT WS_BORDER
+END
+
+IDD_PROXY DIALOGEX 0, 0, 315, 120
+STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Proxy Settings"
+FONT 8, "MS Shell Dlg", 0, 0, 0x1
+BEGIN
+    CONTROL         "&No proxy",IDC_NOPROXY,"Button",BS_AUTORADIOBUTTON,12,19,58,10
+    CONTROL         "HTTP CONNECT",IDC_OTHERPROXY,"Button",BS_AUTORADIOBUTTON,73,19,76,10
+    CONTROL         "SOCKS 4/4a",IDC_SOCKS4APROXY,"Button",BS_AUTORADIOBUTTON,152,19,63,10
+    CONTROL         "SOCKS 5",IDC_SOCKS5PROXY,"Button",BS_AUTORADIOBUTTON,218,19,56,10
+    CONTROL         "Proxy host:",IDC_PROXY_LABEL_HOST,"Static",SS_SIMPLE | WS_GROUP,12,36,90,8
+    EDITTEXT        IDC_PROXYSERVER,105,34,195,12,ES_AUTOHSCROLL
+    CONTROL         "Proxy user name:",IDC_PROXY_LABEL_USER,"Static",SS_SIMPLE | WS_GROUP,12,52,90,8
+    EDITTEXT        IDC_PROXYUSERNAME,105,50,195,12,ES_AUTOHSCROLL
+    CONTROL         "Proxy password:",IDC_PROXY_LABEL_PASS,"Static",SS_SIMPLE | WS_GROUP,12,67,90,8
+    EDITTEXT        IDC_PROXYPASSWORD,105,66,195,12,ES_PASSWORD | ES_AUTOHSCROLL
+    PUSHBUTTON      "?",IDC_PROXYHELP,288,19,12,10
+    GROUPBOX        "Proxy settings",IDC_PROXY_GROUP,5,5,305,88
+    PUSHBUTTON      "Change password...",IDC_EDITPASS,105,65,195,14,NOT WS_VISIBLE
+    CONTROL         "Protect password with password manager (TC>=7.5)",IDC_CRYPTPASS,
+                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,12,81,288,10
+    DEFPUSHBUTTON   "OK",IDOK,205,99,50,14
+    PUSHBUTTON      "Cancel",IDCANCEL,260,99,50,14
+END
+
+IDD_JUMPHOST DIALOGEX 0, 0, 315, 185
+STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "SSH Jump Host (ProxyJump) Settings"
+FONT 8, "MS Shell Dlg", 0, 0, 0x1
+BEGIN
+    GROUPBOX        "Jump host connection",IDC_JUMP_GROUP,5,5,305,170
+    CONTROL         "&Use jump host (ProxyJump)",IDC_JUMP_ENABLE,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,12,17,180,10
+    LTEXT           "Jump host:",IDC_JUMP_LABEL_HOST,12,33,50,8
+    EDITTEXT        IDC_JUMP_HOST,65,31,165,12,ES_AUTOHSCROLL
+    LTEXT           "Port:",IDC_JUMP_LABEL_PORT,235,33,18,8
+    EDITTEXT        IDC_JUMP_PORT,255,31,43,12,ES_AUTOHSCROLL | ES_NUMBER
+    LTEXT           "User name:",IDC_JUMP_LABEL_USER,12,50,50,8
+    EDITTEXT        IDC_JUMP_USER,65,48,233,12,ES_AUTOHSCROLL
+    LTEXT           "&Password:",IDC_JUMP_LABEL_PASS,12,67,50,8
+    EDITTEXT        IDC_JUMP_PASSWORD,65,65,233,12,ES_PASSWORD | ES_AUTOHSCROLL
+    CONTROL         "Protect password with password manager (TC>=7.5)",IDC_JUMP_CRYPTPASS,
+                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,12,80,286,10
+    PUSHBUTTON      "Change password...",IDC_JUMP_EDITPASS,65,65,233,14,NOT WS_VISIBLE
+    LTEXT           "Public key file (*.pub):",IDC_JUMP_LABEL_PUBKEY,12,95,120,8
+    EDITTEXT        IDC_JUMP_PUBKEY,12,105,270,12,ES_AUTOHSCROLL
+    PUSHBUTTON      ">>",IDC_JUMP_LOADPUBKEY,284,105,16,12
+    LTEXT           "Private key file (*.pem;*.ppk):",IDC_JUMP_LABEL_PRIVKEY,12,121,180,8
+    EDITTEXT        IDC_JUMP_PRIVKEY,12,131,270,12,ES_AUTOHSCROLL
+    PUSHBUTTON      ">>",IDC_JUMP_LOADPRIVKEY,284,131,16,12
+    CONTROL         "Use SSH &agent (Pageant) for jump host auth",IDC_JUMP_USEAGENT,
+                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,12,149,286,10
+    DEFPUSHBUTTON   "OK",IDOK,205,163,50,14
+    PUSHBUTTON      "Cancel",IDCANCEL,260,163,50,14
+END
+
+IDD_SESSION_PICKER DIALOGEX 0, 0, 315, 202
+STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Import Sessions"
+FONT 8, "MS Shell Dlg", 0, 0, 0x1
+BEGIN
+    LTEXT           "",IDC_SESSION_SOURCE_LABEL,5,5,305,8
+    CONTROL         "",IDC_SESSION_LIST,"SysListView32",LVS_REPORT | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP,5,18,305,152
+    PUSHBUTTON      "Select &All",IDC_SELECTALL,5,178,70,14
+    PUSHBUTTON      "&Deselect All",IDC_DESELECTALL,81,178,76,14
+    DEFPUSHBUTTON   "&Import",IDOK,184,178,66,14
+    PUSHBUTTON      "Cancel",IDCANCEL,256,178,54,14
+END
+
+IDD_PAIRING_PROGRESS DIALOGEX 0, 0, 220, 62
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION
+CAPTION "LAN Pair"
+FONT 8, "MS Shell Dlg", 0, 0, 0x1
+BEGIN
+    LTEXT           "",IDC_PAIRING_STATUS,10,10,200,10
+    LTEXT           "",IDC_PAIRING_COUNTDOWN,10,24,200,10
+    PUSHBUTTON      "Cancel",IDCANCEL,85,44,50,12
+END
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// DESIGNINFO
+//
+
+#ifdef APSTUDIO_INVOKED
+GUIDELINES DESIGNINFO
+BEGIN
+    IDD_WEBDAV, DIALOG
+    BEGIN
+        LEFTMARGIN, 5
+        TOPMARGIN, 5
+        BOTTOMMARGIN, 283
+    END
+
+    IDD_PROPERTIES, DIALOG
+    BEGIN
+        LEFTMARGIN, 7
+        RIGHTMARGIN, 242
+        TOPMARGIN, 7
+        BOTTOMMARGIN, 207
+    END
+
+    IDD_PROXY, DIALOG
+    BEGIN
+        LEFTMARGIN, 7
+        RIGHTMARGIN, 309
+        TOPMARGIN, 7
+        BOTTOMMARGIN, 113
+    END
+
+    IDD_JUMPHOST, DIALOG
+    BEGIN
+    END
+
+    IDD_SESSION_PICKER, DIALOG
+    BEGIN
+        RIGHTMARGIN, 310
+        BOTTOMMARGIN, 201
+    END
+END
+#endif    // APSTUDIO_INVOKED
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Icon
+//
+
+// Icon with lowest ID value placed first to ensure application icon
+// remains consistent on all systems.
+IDI_ICON0               ICON                    "iconconnection.ico"
+
+IDI_ICON1               ICON                    "icon1.ico"
+
+IDI_ICON2               ICON                    "icon2.ico"
+
+IDI_ICON1SMALL          ICON                    "icon3.ico"
+
+IDI_ICON2SMALL          ICON                    "icon4.ico"
+
+
+#ifdef APSTUDIO_INVOKED
+/////////////////////////////////////////////////////////////////////////////
+//
+// TEXTINCLUDE
+//
+
+1 TEXTINCLUDE 
+BEGIN
+    "resource.h\0"
+END
+
+2 TEXTINCLUDE 
+BEGIN
+    "\0"
+END
+
+3 TEXTINCLUDE 
+BEGIN
+    "\r\n"
+    "\0"
+END
+
+#endif    // APSTUDIO_INVOKED
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// AFX_DIALOG_LAYOUT
+//
+
+IDD_WEBDAV AFX_DIALOG_LAYOUT
+BEGIN
+    0
+END
+
+IDD_PROXY AFX_DIALOG_LAYOUT
+BEGIN
+    0
+END
+
+IDD_SESSION_PICKER AFX_DIALOG_LAYOUT
+BEGIN
+    0
+END
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Version
+//
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 10,0,0,17
+ PRODUCTVERSION 10,0,0,17
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS 0x1L
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS 0x40004L
+ FILETYPE 0x2L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "kvc.pl"
+            VALUE "FileDescription", "SFTP Plugin for Total Commander"
+            VALUE "FileVersion", "10.0.0.17"
+            VALUE "InternalName", "sftpplug"
+            VALUE "LegalCopyright", "Copyright (C) 2026 kvc.pl"
+            VALUE "OriginalFilename", "sftpplug.wfx"
+            VALUE "ProductName", "SFTPplug"
+            VALUE "ProductVersion", "10.0.0.17"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// String Table
+//
+
+STRINGTABLE
+BEGIN
+    IDS_STRING12001         "Out of handles"
+    IDS_STRING12002         "Timeout"
+    IDS_STRING12003         "Extended error"
+    IDS_STRING12004         "Internal Error"
+    IDS_STRING12005         "Invalid URL"
+    IDS_STRING12006         "Unrecognized Scheme"
+    IDS_STRING12007         "Name not resolved"
+    IDS_STRING12008         "Protocol not found"
+    IDS_STRING12009         "Invalid Option"
+    IDS_STRING12010         "Bad option length"
+    IDS_STRING12011         "Option not settable"
+    IDS_STRING12012         "Shutdown"
+    IDS_STRING12013         "Incorrect user name"
+    IDS_STRING12014         "Incorrect password"
+    IDS_STRING12015         "Login failure"
+END
+
+STRINGTABLE
+BEGIN
+    IDS_STRING12016         "Invalid operation"
+    IDS_STRING12017         "Operation cancelled"
+    IDS_STRING12018         "Incorrect handle type"
+    IDS_STRING12019         "Incorrect handle state"
+    IDS_STRING12020         "Not a proxy request"
+    IDS_STRING12021         "Registry value not found"
+    IDS_STRING12022         "Bad registry parameter"
+    IDS_STRING12023         "No direct access"
+    IDS_STRING12024         "No context"
+    IDS_STRING12025         "No callback"
+    IDS_STRING12026         "Request pending"
+    IDS_STRING12027         "Incorrect format"
+    IDS_STRING12028         "Item not found"
+    IDS_STRING12029         "Cannot connect"
+    IDS_STRING12030         "Connection aborted"
+    IDS_STRING12031         "Connection reset"
+END
+
+STRINGTABLE
+BEGIN
+    IDS_STRING12032         "Force retry"
+    IDS_STRING12033         "Invalid proxy request"
+    IDS_STRING12034         "Need UI"
+    IDS_STRING12035         "Unknown"
+    IDS_STRING12036         "Handle exists"
+    IDS_STRING12037         "Certificate date is invalid"
+    IDS_STRING12038         "Certificate CN is invalid"
+    IDS_STRING12039         "Redirect from http to https"
+    IDS_STRING12040         "Redirect from https to http"
+    IDS_STRING12041         "Mixed security"
+    IDS_STRING12042         "CHG Post is non-secure"
+    IDS_STRING12043         "Post is non secure"
+    IDS_STRING12044         "A client certificate is needed for authentication"
+    IDS_STRING12045         "Invalid Certification Agency"
+    IDS_STRING12046         "Client authentication hasn't been setup"
+    IDS_STRING12047         "Async thread failed"
+END
+
+STRINGTABLE
+BEGIN
+    IDS_STRING12048         "Redirect scheme change"
+    IDS_STRING12049         "Dialog pending"
+    IDS_STRING12050         "Retry dialog"
+    IDS_STRING12051         "Unknown"
+    IDS_STRING12052         "HTTPS to HTTP submit redirection"
+    IDS_STRING12053         "Insert CD-ROM"
+    IDS_LAN_ROLE_PROMPT     "LAN Pair peer found.\nChoose role:\n\nYes = Donor\nNo = Receiver\nCancel = no change"
+    IDS_LAN_SESSION_TIMEOUT "Session timeout: [__] min (0=no limit)"
+    IDS_IMP_TITLE_PUTTY     "Import PuTTY Sessions"
+    IDS_IMP_TITLE_WINSCP    "Import WinSCP Sessions"
+    IDS_IMP_TITLE_PUTTY_PORT "Import PuTTY Portable Sessions"
+    IDS_IMP_FOUND_REG       "Found {} {} sessions (registry):"
+    IDS_IMP_FOUND_FILE      "Found {} sessions in {}:"
+    IDS_IMP_BTN_SELECT_ALL  "Select &All"
+    IDS_IMP_BTN_DESELECT_ALL "&Deselect All"
+    IDS_IMP_BTN_IMPORT      "&Import"
+END
+
+STRINGTABLE
+BEGIN
+    IDS_IMP_BTN_CANCEL      "Cancel"
+    IDS_IMP_MSG_NONE        "No sessions imported."
+    IDS_IMP_MSG_NOT_FOUND   "No sessions found in {}."
+    IDS_IMP_MENU_ALL        "Import all ({})"
+    IDS_IMP_MENU_FROM_PUTTY_PORT "Import from PuTTY Portable folder..."
+    IDS_IMP_MENU_FROM_WINSCP "Import from WinSCP Portable folder..."
+    IDS_IMP_TITLE_KITTY_PORT "Import KiTTY Portable Sessions"
+    IDS_IMP_MENU_FROM_KITTY_PORT "Import from KiTTY Portable folder..."
+    IDS_SCP_PROTOCOL_ERROR  "SCP Protocol Error"
+    IDS_SCP_EXEC_FAILED     "Cannot execute SCP to start transfer. Please make sure that SCP is installed on the server and path to it is included in PATH.\n\nYou may also try SFTP instead of SCP (uncheck 'Use SCP for all' in connection settings)."
+    IDS_LAN_ERR_NO_PEER     "LAN Pair: no peer configured. Open connection settings and pair first."
+    IDS_LAN_ERR_PEER_NOT_FOUND 
+                            "LAN Pair: peer not found on the network. Make sure the other computer is running."
+    IDS_ERR_INVALID_PROXY   "Invalid proxy server address."
+    IDS_ERR_NOT_SUPPORTED   "Function not supported yet!"
+    IDS_ERR_NO_PLUGIN_DIR   "Cannot locate plugin directory."
+    IDS_ERR_JUMP_SESSION    "ProxyJump: libssh2 session init failed"
+END
+
+STRINGTABLE
+BEGIN
+    IDS_ERR_LOAD_PASS       "Failed to load password!"
+    IDS_ERR_LOAD_PROXY_PASS "Failed to load proxy password!"
+    IDS_ERR_INVALID_SERVER  "Invalid server address."
+    IDS_ERR_OOM_CONN_SETTINGS 
+                            "Out of memory while creating connection settings."
+    IDS_IMP_MSG_UNSUPPORTED_PROTO 
+                            "No sessions imported (unsupported protocol type)."
+    IDS_IMP_ERR_NO_PUTTY_REG 
+                            "putty.reg not found in the selected folder or its subfolders."
+    IDS_IMP_ERR_PARSE_PUTTY_REG "Failed to read or parse putty.reg."
+    IDS_IMP_ERR_NO_KITTY_SESSIONS 
+                            "Sessions folder not found in the selected KiTTY Portable directory."
+    IDS_ERR_SESSION_EXISTS  "Session with this name already exists.\nChoose a different session name."
+    IDS_TITLE_SFTP          "SFTP"
+    IDS_PAIRING_SEARCH      "Searching for LAN Pair peer on local network..."
+    IDS_PAIRING_SECS        "{} s"
+    IDS_PAIRING_TIMEOUT     "LAN Pair: no peer found."
+    IDS_LAN_TI              "TrustedInstaller"
+    IDS_LAN_TI_ERR          "LAN Pair: TrustedInstaller impersonation failed. The process may not be running as Administrator."
+    IDS_LAN_CONNECTING      "LAN Pair: connecting to {}..."
+END
+
+STRINGTABLE
+BEGIN
+    IDS_JUMP_DLG_PASS       "&Password:"
+    IDS_JUMP_DLG_PUBKEY     "Public key file (*.pub):"
+    IDS_JUMP_DLG_PRIVKEY    "Private key file (*.pem;*.ppk):"
+    IDS_JUMP_DLG_USEAGENT   "Use SSH &agent (Pageant) for jump host auth"
+    IDS_BTN_HELP            "Help"
+    IDS_BTN_CANCEL          "Cancel"
+    IDS_DLG_PHP_TAR         "TAR stream"
+    IDS_DLG_SYSTEM          "System:"
+    IDS_DLG_PHP_METHOD      "Method:"
+    IDS_DLG_PHP_CHUNKS      "Chunks:"
+    IDS_BTN_OK              "OK"
+    IDS_TRANSFERMODE_SSH    "SSH (SFTP/SCP)"
+    IDS_TRANSFERMODE_PHP_AGENT "PHP Agent (HTTP)"
+    IDS_TRANSFERMODE_PHP_SHELL "PHP Shell (HTTP)"
+    IDS_PHP_ERR_UNREACHABLE "Cannot reach PHP agent endpoint."
+    IDS_PHP_ERR_NOT_FOUND   "PHP agent endpoint not found (HTTP 404).\nCheck URL path/filename and upload sftp.php to that location."
+END
+
+STRINGTABLE
+BEGIN
+    IDS_DLG_WIN_LINEBREAKS  "Windows (CR/LF)"
+    IDS_DLG_UNIX_LINEBREAKS "Unix (LF)"
+    IDS_PROXY_DLG_NOPROXY   "No proxy"
+    IDS_PROXY_DLG_HTTP      "HTTP CONNECT"
+    IDS_PROXY_DLG_SOCKS4A   "SOCKS 4/4a"
+    IDS_PROXY_DLG_SOCKS5    "SOCKS 5"
+END
+
+STRINGTABLE
+BEGIN
+    IDS_PHP_ERR_UNCONFIGURED 
+                            "PHP agent is not configured on server (HTTP 503).\nSet AGENT_PSK / AGENT_PSK_SHA256 in sftp.php and upload again."
+    IDS_PHP_ERR_WRONG_CREDS_HTTP "Wrong credentials for PHP Agent (HTTP {})."
+    IDS_PHP_ERR_REQUEST_FAILED "PHP Agent request failed for {} (HTTP {})."
+    IDS_PHP_ERR_REJECTED    "PHP Agent rejected request: {}"
+    IDS_PHP_ERR_VALIDATION  "PHP Agent validation failed (HTTP {})."
+    IDS_PHP_ERR_WRONG_CREDS "Wrong credentials for PHP Agent."
+    IDS_PHP_SHELL_SELECT    "Select Transfer = PHP Shell (HTTP)."
+    IDS_PHP_SHELL_TITLE     "PHP Shell"
+    IDS_PHP_AGENT_TITLE     "PHP Agent"
+    IDS_PHP_COPY_FROM       "\n\nPlease copy your plugin script from:\n"
+    IDS_PHP_UPLOAD_TO       "\nand upload it to your server URL path."
+    IDS_PHP_CHECK_URL       "\n\nPlease check URL syntax, file name, and sftp.php deployment path on server."
+    IDS_PHP_PROBE_FAILED    "PHP Agent probe failed. Check URL and key."
+    IDS_LOG_SCP_SKIP_PROBE  "SCP-only: skipping auth-methods probe."
+    IDS_LOG_AUTH_METHODS_TIMEOUT 
+                            "Getting auth methods timed out, using fallback."
+    IDS_LOG_AUTH_METHODS_NONE "Auth methods list empty, using fallback."
+END
+
+STRINGTABLE
+BEGIN
+    IDS_LOG_AUTH_NO_PASSWORD "User authenticated without password."
+    IDS_LOG_KBD_AUTH_TIMEOUT "Keyboard-interactive auth timed out."
+    IDS_LOG_PASS_AUTH_TIMEOUT "Password authentication timed out."
+    IDS_LOG_LOADING_SSH_LIB "Loading SSH Library..."
+    IDS_LOG_LAN_DISCOVER    "LAN Pair: locating peer via discovery..."
+    IDS_LOG_LAN_CONNECTED   "LAN Pair: connected."
+    IDS_LOG_PHP_AGENT_MODE  "PHP Agent mode"
+    IDS_LOG_POST_AUTH_INIT  "Starting post-auth initialization..."
+    IDS_LOG_SCP_RECONNECT   "SCP: connection lost, trying to reconnect!"
+    IDS_LOG_RECONNECT       "Connection lost, trying to reconnect."
+    IDS_LOG_SFTP_INIT       "Initializing SFTP subsystem..."
+    IDS_LOG_SEND_STORED_PASS "Sending stored password..."
+    IDS_LOG_REQUEST_PASS    "Requesting password from user..."
+    IDS_LOG_SEND_USER_PASS  "Sending password entered by user..."
+    IDS_LOG_PPK_ERR_VERSION "Failed to convert .ppk: unsupported PPK version."
+    IDS_LOG_PPK_ERR_ALGO    "Failed to convert .ppk: unsupported key algorithm."
+END
+
+STRINGTABLE
+BEGIN
+    IDS_LOG_PPK_ERR_ENC     "Failed to convert .ppk: unsupported encryption/KDF."
+    IDS_LOG_PPK_ERR_ARGON2  "Failed to convert .ppk: Argon2 runtime not available."
+    IDS_LOG_PPK_ERR_PASSPHRASE 
+                            "Failed to convert .ppk: wrong passphrase or corrupted key."
+    IDS_LOG_PPK_ERR_GENERIC "Failed to convert .ppk."
+    IDS_LOG_PPK_CONVERTING  "Converting PPK file..."
+    IDS_LOG_PAGEANT_TIMEOUT "Pageant authentication timed out."
+    IDS_LOG_PUBKEY_TIMEOUT  "Public key authentication timed out."
+    IDS_LOG_JUMP_NO_FP      "Jump host: failed to get fingerprint"
+    IDS_LOG_JUMP_AUTH_NONE  "Jump host: already authenticated (no auth needed)"
+    IDS_LOG_JUMP_AGENT_TRY  "Jump host: trying agent auth..."
+    IDS_LOG_JUMP_AGENT_OK   "Jump host: agent auth OK"
+    IDS_LOG_JUMP_AGENT_FAIL "Jump host: agent auth failed, trying other methods"
+    IDS_LOG_JUMP_PUBKEY_TRY "Jump host: trying public key auth..."
+    IDS_LOG_JUMP_PUBKEY_OK  "Jump host: public key auth OK"
+    IDS_LOG_JUMP_PUBKEY_FAIL "Jump host: public key auth failed"
+    IDS_LOG_JUMP_PASS_TRY   "Jump host: trying password auth..."
+END
+
+STRINGTABLE
+BEGIN
+    IDS_LOG_JUMP_PASS_OK    "Jump host: password auth OK"
+    IDS_LOG_JUMP_PASS_FAIL  "Jump host: password auth failed"
+    IDS_LOG_JUMP_KBD_TRY    "Jump host: trying keyboard-interactive auth..."
+    IDS_LOG_JUMP_KBD_OK     "Jump host: keyboard-interactive auth OK"
+    IDS_LOG_JUMP_KBD_FAIL   "Jump host: keyboard-interactive auth failed"
+    IDS_LOG_JUMP_AUTH_FAIL  "Jump host: all auth methods failed"
+    IDS_LOG_PROXYJUMP       " -- ProxyJump -- "
+    IDS_LOG_JUMP_SSH_FAIL   "Jump host: failed to create SSH session"
+    IDS_LOG_JUMP_HANDSHAKE  "Jump host: SSH handshake..."
+    IDS_LOG_JUMP_HANDSHAKE_OK "Jump host: SSH handshake OK"
+    IDS_LOG_JUMP_FP_REJECTED "Jump host: fingerprint rejected"
+    IDS_LOG_JUMP_TCP_FAIL   "Jump host: TCP connect failed to "
+    IDS_LOG_JUMP_TCP_OK     "Jump host: TCP connected to "
+    IDS_LOG_JUMP_HANDSHAKE_FAIL "Jump host: SSH handshake failed: "
+    IDS_LOG_DETECT_UTF8     "Auto-detecting UTF-8 support..."
+    IDS_LOG_DETECT_LINEBREAK "Auto-detecting line break mode..."
+END
+
+STRINGTABLE
+BEGIN
+    IDS_LOG_USER_COMMAND    "Sending user-defined command:"
+    IDS_LOG_SCP64           "64-bit SCP detected!"
+    IDS_LOG_SCP_OPEN_TIMEOUT "SCP download: open channel timeout."
+    IDS_LOG_SCP_DROPPED     "SCP: connection dropped, reconnecting..."
+    IDS_LOG_SCP_SESSION_LOST "SCP: session lost, reconnecting..."
+    IDS_LOG_SCP_NO_SHELL    "SCP listing: no shell"
+    IDS_LOG_SCP_LIST_FAIL   "SCP listing failed: no output or timeout."
+    IDS_LOG_SCP_MKDIR_FAIL  "SCP Mkdir: channel creation failed"
+    IDS_LOG_SFTP_OPEN_TIMEOUT "SFTP open timeout/aborted."
+    IDS_LOG_SCP_DL_TIMEOUT  "SCP download timed out."
+    IDS_LOG_SCP_UL_TIMEOUT  "SCP upload timed out."
+    IDS_LOG_SHELL_DL_START  "Shell transfer: starting download..."
+    IDS_LOG_SHELL_BASE64    "Shell transfer: using base64 (compat mode)..."
+    IDS_LOG_SHELL_UL_START  "Shell transfer: starting upload..."
+    IDS_LOG_PHP_SKIP_UPDATE "PHP Agent: local sftp.php update skipped (missing or read-only file)."
+    IDS_LOG_TAR_UPLOAD      "TAR upload:"
+END
+
+STRINGTABLE
+BEGIN
+    IDS_LOG_TAR_UPLOAD_FAIL "TAR upload failed"
+    IDS_DLG_SELECT_PUBKEY   "Select public key file"
+    IDS_DLG_SELECT_PRIVKEY  "Select private key file"
+    IDS_IMP_BROWSE_PUTTY_FOLDER "Select PuTTY Portable folder"
+    IDS_IMP_MENU_PUTTY      "PuTTY ({})..."
+    IDS_IMP_MENU_WINSCP     "WinSCP ({})..."
+    IDS_IMP_MSG_IMPORTED    "Imported {} session(s)."
+    IDS_IMP_MSG_IMPORTED_SKIPPED "Imported {} session(s).\nSkipped {} {}."
+    IDS_IMP_MSG_SKIP_UNSUPPORTED "unsupported session(s)"
+    IDS_IMP_MSG_SKIP_WINSCP "unsupported WinSCP session(s)"
+    IDS_PROXY_LABEL_SOCKS4A "SOCKS4a: "
+    IDS_PROXY_LABEL_SOCKS5  "SOCKS5: "
+    IDS_DLG_CODEPAGE_TITLE  "Code page"
+    IDS_DLG_CODEPAGE_PROMPT "Code page (e.g. 28591):"
+END
+
+STRINGTABLE
+BEGIN
+    IDS_F7NEW               "F7 - help.txt"
+    IDS_HELPTEXT            "Plugin help:\r\nF7:\tCreate new connection (TC shows New Folder - enter connection name)\r\nF8/Del:\tDelete connection\r\nEnter:\tConnect\r\nAlt+Enter:\tChange options\r\n\r\nTransfer modes:\r\nSSH (SFTP/SCP):\tDefault, fastest when SSH access is available\r\nUse SCP for data:\tUse when SFTP is blocked/unstable\r\nUse SCP only:\tDisable SFTP completely (legacy hosts)\r\nShell transfer force:\tForce shell-based transfer (dd/base64)\r\nPHP Agent (HTTP):\tNo SSH account needed; use uploaded sftp.php\r\nPHP Shell (HTTP):\tPseudo-terminal over HTTP via sftp.php"
+    IDS_QUICKCONNECT        "Quick Connection"
+END
+
+STRINGTABLE
+BEGIN
+    IDS_HELP_CAPTION        "Help"
+    IDS_HELP_UTF8           "Here you can configure how the server sends file names with accents. When you choose 'auto-detect', the plugin will get some environment variables (like LANG) and send the command 'locale' to determine the character encoding used by the server. This may not work with all servers, so if you know that your server uses UTF-8, or file names in file lists appear with strange looking characters instead of accents, then please choose 'yes' manually."
+    IDS_HELP_PROXY          "You can choose to connect directly, or to define a proxy server in the form proxy(:port). If your proxy requires username/password, you need to enter them here. The proxy must allow the CONNECT command to the port of your SSH server, or use the SOCKS protocol."
+    IDS_HELP_CERT           "Here you can enter the location of the public/private key pair for client certificate authentication.\nThe keys must be in OpenSSH/PEM format.\n\nPuTTY PPK files (*.ppk) are converted natively by the plugin.\nNo external conversion tool is required.\n\nSupports environment variables like %commander_path%.\n%USER% (uppercase!) will be replaced by current user."
+    IDS_CONNECT_TO          "Connecting to: "
+    IDS_VIA_PROXY           "Via proxy:"
+    IDS_ERR_PROXYCONNECT    "Error: failed to connect to the PROXY!"
+    IDS_ERR_SERVERCONNECT   "Error: failed to connect to the given server!"
+    IDS_VIA_PROXY_CONNECT   "Error: Could not connect via proxy to the server!"
+    IDS_ERR_INIT_SSH2       "Error: Could not initialize ssh2 connection!"
+    IDS_ERR_SSH_SESSION     "Error: Could not start SSH session:\n"
+    IDS_ERR_AUTH_PUBKEY     "Error: Authentication by client certificate failed!\n"
+    IDS_ERR_AUTH_PASSWORD   "Error: Authentication by password failed!"
+    IDS_ERR_AUTH_KEYBDINT   "Error: Authentication by keyboard-interactive failed!"
+END
+
+STRINGTABLE
+BEGIN
+    IDS_ERR_INIT_SFTP       "Error: Could not initialize SFTP session!\n"
+    IDS_PROXY_PASSWORD_FOR  "SFTP proxy password for "
+    IDS_PROXY_PASSWORD      "Proxy password:"
+    IDS_USERNAME_FOR        "SFTP user name for "
+    IDS_INITSSH2            "Initialize SSH2..."
+    IDS_SET_COMPRESSION     "Set Compression"
+    IDS_SESSION_STARTUP     "Session startup"
+    IDS_SSH_LOGIN           "Login via SSH2..."
+    IDS_SERVER_FINGERPRINT  "Server fingerprint:"
+    IDS_CONNECTION_FIRSTTIME 
+                            "You are using this connection for the first time.\nPlease verify that the following host fingerprint matches the fingerprint of your server:\n\n"
+    IDS_FINGERPRINT_CHANGED "WARNING!\nThe fingerprint of the host has changed!\nPlease make sure that the new fingerprint matches your server:\n\n"
+    IDS_FINGERPRINT         "Fingerprint: "
+    IDS_CONNECTING          "Connecting..."
+    IDS_USER_AUTH_LIST      "Getting supported authentication methods..."
+    IDS_SUPPORTED_AUTH_METHODS "Supported authentication methods: "
+    IDS_ERR_LOAD_PUBKEY     "Cannot open public key file!\n"
+END
+
+STRINGTABLE
+BEGIN
+    IDS_ERR_LOAD_PRIVKEY    "Cannot open private key file!\n"
+    IDS_ERR_PUBKEY_WRONG_FORMAT 
+                            "Public key file has wrong format, see readme.txt for instructions!"
+    IDS_PASSPHRASE          "SFTP passphrase for "
+    IDS_KEYPASSPHRASE       "Private key pass phrase:"
+    IDS_AUTH_PUBKEY_FOR     "Authentication via client certificate for user: "
+    IDS_AUTH_PUBKEY         "Authentication via client certificate"
+    IDS_AUTH_PASSWORD_FOR   "Authentication via password for user: "
+    IDS_AUTH_PASSWORD       "Authenticate with password"
+    IDS_AUTH_KEYBDINT_FOR   "Auth via keyboard interactive for user: "
+    IDS_AUTH_KEYBDINT       "Authenticate with keyboard-interactive"
+    IDS_FTP_INIT            "Establishing SFTP connection..."
+    IDS_DISCONNECTING       "Disconnect..."
+    IDS_GET_DIRECTORY       "Get Directory"
+    IDS_PROXY_CONNECT       "Proxy connect to server..."
+    IDS_ERR_GETADDRINFO     "Could not resolve host, getaddrinfo failed!"
+    IDS_GET_DIR             "Get directory: "
+END
+
+STRINGTABLE
+BEGIN
+    IDS_ERR_GET_DIR         "Directory not opened: "
+    IDS_MK_DIR              "Create directory: "
+    IDS_ERR_MK_DIR          "Directory not created: "
+    IDS_RENFR               "Rename from: "
+    IDS_RENTO               "Rename to:"
+    IDS_ERR_RENAME          "Rename FAILED: "
+    IDS_DOWNLOAD            "Download file: "
+    IDS_UPLOAD              "Upload file: "
+    IDS_DELETE              "Delete file: "
+    IDS_ERR_DELETE          "Delete FAILED: "
+    IDS_AUTO                "Auto-detect"
+    IDS_YES                 "Yes"
+    IDS_NO                  "No"
+    IDS_OUTOFREACH          "The link target is outside of the plugin base directory:\n"
+    IDS_FOLLOWLINKROOT      "\nIf you follow this link, the plugin's root will be changed to the root directory / of the server!"
+    IDS_SOCKS5PROXYERR      "SOCKS 5 Proxy user/password error!"
+END
+
+STRINGTABLE
+BEGIN
+    IDS_GENERALSOCKSFAILURE "General SOCKS server failure!"
+    IDS_CONNNOTALLOWED      "Connection not allowed by ruleset!"
+    IDS_NETUNREACHABLE      "Network unreachable!"
+    IDS_HOSTUNREACHABLE     "Host unreachable!"
+    IDS_CONNREFUSED         "Connection refused!"
+    IDS_TTLEXPIRED          "TTL (packet time to live) expired!"
+    IDS_CMDNOTSUPPORTED     "SOCKS Command not supported!"
+    IDS_ADDRTYPENOTSUPPORTED "Address type not supported!"
+    IDS_UNKNOWNSOCKERR      "Unknown SOCKS5 error %d!"
+    IDS_DUMMY               "1"
+    IDS_DUMMY2              "2"
+    IDS_DUMMY3              "3"
+    IDS_UTF8                "UTF-8"
+    IDS_ANSI                "ANSI (local) (0)"
+    IDS_ASCII               "ASCII/DOS (1)"
+    IDS_MACOS               "MacOS (2)"
+END
+
+STRINGTABLE
+BEGIN
+    IDS_1250                "Eastern Europe (1250)"
+    IDS_1251                "Cyrillic Windows (1251)"
+    IDS_1252                "Western Latin1 (1252)"
+    IDS_1253                "Greek (1253)"
+    IDS_1254                "Turkish (1254)"
+    IDS_1255                "Hebrew (1255)"
+    IDS_1256                "Arabic (1256)"
+    IDS_1257                "Baltic (1257)"
+    IDS_1258                "Vietnamese (1258)"
+    IDS_936                 "Chinese Main Land (936)"
+    IDS_950                 "Chinese Taiwan (950)"
+    IDS_932                 "Japanese (932)"
+    IDS_949                 "Korean (949)"
+    IDS_874                 "Thai (874)"
+    IDS_437                 "DOS-USA (437)"
+    IDS_850                 "DOS-LATIN1 (850)"
+END
+
+STRINGTABLE
+BEGIN
+    IDS_20866               "Cyrillic KOI8-R (20866)"
+    IDS_OTHER               "Other (enter manually)"
+    IDS_SSH2_TOO_OLD        "Library libssh2.dll is too old for Pageant functions!\nMinimum required version is %s."
+    IDS_AGENT_CONNECTERROR  "Failure connecting to ssh-agent (Pageant)!\nYou can put a link file named pageant.lnk in the plugin directory to launch pageant, e.g. pointing to\nc:\\path\\pageant.exe keyfilename"
+    IDS_AGENT_REQUESTIDENTITIES 
+                            "Failure requesting identities from ssh-agent!"
+    IDS_AGENT_AUTHFAILED    "Agent authentication failed!"
+    IDS_AGENT_AUTHSUCCEEDED "Agent authentication succeeded!"
+    IDS_AGENT_NOIDENTITY    "Failure obtaining identity from ssh-agent!"
+    IDS_AGENT_TRYING1       "Trying to authenticate user """
+    IDS_AGENT_TRYING2       """ with key """
+    IDS_AGENT_TRYING3       """ using agent..."
+    IDS_NO_PROXY            "No proxy (direct connection)"
+    IDS_HTTP_PROXY          "HTTP CONNECT: "
+    IDS_ADD_PROXY           "Add new proxy..."
+    IDS_ERROR_INUSE         "Error, this proxy is in use by at least one connection:"
+    IDS_PROXY_PASS_TITLE    "Proxy password for user: "
+END
+
+STRINGTABLE
+BEGIN
+    IDS_PASS_TITLE          "Server password for user: "
+    IDS_PASS_CHANGE_REQUEST "The server requests that you change your password. New password:"
+    IDS_DLL_VERSION         "libssh2 has to be version 1.7.0 or higher to support filesize > 2 GB over SCP."
+    IDS_NO_2GB_SUPPORT      "The server may not support the transfer of files >2GB via SCP! Try anyway?"
+    IDS_HELP_PASSWORD       "For security reasons, you should only save passwords protected by a master password.\n\nIf you need 2 passwords (for private key and login), enter them as follows:\n\n""KeyPassword"",""LoginPasswort"""
+    IDS_TRANSFERMODE_LANPAIR "LAN Pair"
+    IDS_LAN_ROLE_LABEL      "Pair role:"
+    IDS_LAN_PEER_LABEL      "Peer:"
+    IDS_LAN_ROLE_AUTO       "Auto"
+    IDS_LAN_ROLE_RECEIVER   "Receiver"
+    IDS_LAN_ROLE_DONOR      "Donor"
+    IDS_LAN_PEER_AUTODISC   "Auto-discovery"
+    IDS_BUTTON_PAIR         "Pair..."
+    IDS_BUTTON_SHELL        "Shell..."
+    IDS_LAN_TITLE           "LAN Pair"
+    IDS_LAN_ERR_PASSWORD    "Pairing password (optional ? leave empty to use stored trust key)."
+END
+
+STRINGTABLE
+BEGIN
+    IDS_LAN_MSG_RECEIVER_STOPPED "LAN Pair receiver stopped."
+    IDS_LAN_ERR_RECEIVER_START "Receiver start failed: {}"
+    IDS_LAN_MSG_RECEIVER_STARTED 
+                            "LAN Pair receiver started (port 45846). Click Pair... again to stop."
+    IDS_LAN_ERR_SELECT_PEER "Select discovered peer first in Peer list."
+    IDS_LAN_ERR_PEER_UNAVAILABLE "Selected peer is no longer available."
+    IDS_LAN_ERR_PAIR_FAILED "Pairing failed: {}"
+    IDS_LAN_MSG_PAIR_OK     "Pairing OK with {} ({})"
+    IDS_LAN_PASSWORD_LABEL  "Pairing password:"
+    IDS_LAN_MSG_RECEIVER_RUNNING "LAN Pair receiver already running."
+    IDS_LAN_MSG_ACCEPTED    "LAN Pair accepted: {} ({})"
+    IDS_LAN_MSG_AUTO_LISTEN "LAN Pair: listening. Role dialog will appear when peer is detected."
+    IDS_DLG_CAPTION         "Connect to SFTP Server"
+    IDS_DLG_CONNECTTO       "&Connect to: (server/path or server:port/path)"
+    IDS_DLG_USERNAME        "&User name:"
+    IDS_DLG_USEAGENT        "Use SSH agent (Pageant)"
+END
+
+STRINGTABLE
+BEGIN
+    IDS_DLG_CHANGEPASS      "Change password..."
+    IDS_DLG_CRYPTPASS       "Protect password with password manager (TC>=7.5)"
+    IDS_DLG_CERTGROUP       "Client certificate for &authentication:"
+    IDS_DLG_PUBKEY          "Public key file (*.pub):"
+    IDS_DLG_PRIVKEY         "Private key file (*.pem;*.ppk):"
+    IDS_DLG_COMPRESS        "Compress with &ZLIB (may fail on some servers)"
+    IDS_DLG_DETAILED_LOG    "Log full directory listings (&debug)"
+    IDS_DLG_SHELLTRANSFER   "Use shell transfer (blocked hosts)"
+    IDS_DLG_SCP_DATA        "Use SCP for data transfers (faster!)"
+    IDS_DLG_SCP_ALL         "Use SCP for everything (no SFTP)"
+    IDS_DLG_TRANSFER        "Transfer:"
+    IDS_DLG_ENCODING        "Encoding (codepage) of file names:"
+    IDS_DLG_PERMISSIONS_GROUP 
+                            " User &rights of newly created files/directories: "
+    IDS_DLG_FILEMOD         "New files (Upload):"
+    IDS_DLG_DIRMOD          "New folders:"
+    IDS_DLG_SESSION         "Session:"
+END
+
+STRINGTABLE
+BEGIN
+    IDS_DLG_JUMPHOST_GRP    "Jump host:"
+    IDS_DLG_USE_JUMPHOST    "Use &jump host"
+    IDS_DLG_PROXY_SETTINGS  "Proxy settings:"
+    IDS_DLG_DELETELAST      "Delete proxy"
+    IDS_DLG_IMPORT          "Import..."
+    IDS_PROXY_DLG_CAPTION   "Proxy Settings"
+    IDS_PROXY_DLG_GROUP     "Proxy settings"
+    IDS_PROXY_DLG_HOST      "Proxy host:"
+    IDS_PROXY_DLG_USER      "Proxy user name:"
+    IDS_PROXY_DLG_PASS      "Proxy password:"
+    IDS_JUMP_DLG_CAPTION    "SSH Jump Host (ProxyJump) Settings"
+    IDS_JUMP_DLG_GROUP      "Jump host connection"
+    IDS_JUMP_DLG_USE        "&Use jump host (ProxyJump)"
+    IDS_JUMP_DLG_HOST       "Jump host:"
+    IDS_JUMP_DLG_PORT       "Port:"
+    IDS_JUMP_DLG_USER       "User name:"
+END
+
+STRINGTABLE
+BEGIN
+    IDS_LAN_ERR_CONN_FAILED "LAN Pair: connection failed"
+    IDS_IMP_MENU_PUTTY_HDR       "PuTTY"
+    IDS_IMP_MENU_WINSCP_HDR      "WinSCP"
+    IDS_IMP_MENU_OTHER_HDR       "Other"
+    IDS_IMP_BROWSE_WINSCP_FOLDER "Select WinSCP Portable folder"
+    IDS_IMP_ERR_NO_WINSCP_INI    "WinSCP.ini not found in the selected folder."
+    IDS_IMP_BROWSE_KITTY_FOLDER  "Select KiTTY Portable folder"
+    IDS_LAN_ERR_DONOR_NO_CONNECT "LAN Pair: this machine is configured as Donor. The remote Receiver must connect here."
+END
+
+#endif    // English (United States) resources
+/////////////////////////////////////////////////////////////////////////////
+
+
+
+#ifndef APSTUDIO_INVOKED
+/////////////////////////////////////////////////////////////////////////////
+//
+// Generated from the TEXTINCLUDE 3 resource.
+//
+
+
+/////////////////////////////////////////////////////////////////////////////
+#endif    // not APSTUDIO_INVOKED
+

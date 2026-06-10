@@ -1,0 +1,210 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>PHP Agent (HTTP)</title><link rel="stylesheet" href="assets/style.css"></head>
+<body>
+<h1>PHP Agent (HTTP)</h1>
+
+<p>PHP Agent lets you manage files on a web server via HTTP — without any SSH account or SSH daemon. The entire server-side logic lives in one file: <code>sftp.php</code>.</p>
+
+<p>Typical use case: shared hosting where you have FTP/SFTP disabled or no shell access, but PHP is available.</p>
+
+<div class="warn">
+  <b>Important — read before you do anything:</b><br>
+  The <code>sftp.php</code> included in the plugin package has <b>no password configured</b>.
+  If you upload it to your server before setting a password in the plugin, the server will reject every connection with HTTP 503.
+  <b>Always set the password in the plugin dialog first, save the session, then upload.</b>
+</div>
+
+<h2>How it works — the big picture</h2>
+
+<ol>
+  <li>You choose a password for the connection.</li>
+  <li>The plugin stores a <b>salted SHA-256 hash</b> of that password into your local <code>sftp.php</code>. The password itself is never written to any file.</li>
+  <li>You upload that modified <code>sftp.php</code> to your web server.</li>
+  <li>When you connect, the plugin signs every request with HMAC-SHA256 using your password. The server verifies the signature against the stored hash. The password never travels over the network in any readable form.</li>
+</ol>
+
+<p>This means: even if someone reads <code>sftp.php</code> on the server, they cannot recover your password — they only see a hash.</p>
+
+<h2>Step-by-step deployment</h2>
+
+<h3>Step 1 — Set up the connection in Total Commander</h3>
+
+<p>Open the plugin connection dialog (Net → Connect, or the Network Neighborhood panel). Fill in:</p>
+
+<table border="1" cellpadding="5" cellspacing="0">
+  <tr><th>Field</th><th>What to enter</th><th>Example</th></tr>
+  <tr><td><b>Connect to:</b></td><td>Full HTTPS URL to sftp.php on your server (the file does not exist yet — enter where it will be)</td><td><code>https://example.com/sftp.php</code></td></tr>
+  <tr><td><b>Transfer mode:</b></td><td>Select <b>PHP Agent (HTTP)</b> from the dropdown</td><td>—</td></tr>
+  <tr><td><b>Password:</b></td><td>Choose any password — this will be your shared secret between TC and the server</td><td><code>MySecretPass123</code></td></tr>
+  <tr><td><b>Session name:</b></td><td>Give the session a name for easy identification</td><td><code>My Hosting</code></td></tr>
+</table>
+
+<div class="note">
+  <b>URL format:</b> Always use <code>https://</code> in production. Plain <code>http://</code> is allowed for local testing only — over HTTP all traffic is unencrypted.
+</div>
+
+<h3>Step 2 — Save the session</h3>
+
+<p>Click <b>Save</b> (or press F2 if available). At this point the plugin:</p>
+<ul>
+  <li>Encrypts the password with Windows DPAPI and stores it in <code>sftpplug.ini</code></li>
+  <li>Opens its local copy of <code>sftp.php</code> and writes two fields into it: <code>AGENT_PSK_SALT</code> (random) and <code>AGENT_PSK_SHA256</code> (SHA-256 hash of salt + your password)</li>
+</ul>
+
+<p>The local <code>sftp.php</code> that now contains your password hash is located at:</p>
+<pre>...\Total Commander\plugins\wfx\SFTPplug\sftp.php</pre>
+<p>This is the file you will upload. <b>Do not use the original sftp.php from the download package</b> — it has empty PSK fields.</p>
+
+<h3>Step 3 — Upload sftp.php to your server</h3>
+
+<p>Copy the file from the path above to your web server so that it is accessible at the URL you entered in Step 1.</p>
+
+<p>Example: if you entered <code>https://example.com/sftp.php</code>, upload the file to the root of your web space as <code>sftp.php</code>.</p>
+
+<p>You can upload it using any method: FTP, cPanel File Manager, your hosting control panel, or any other file manager.</p>
+
+<div class="note">
+  <b>File permissions on Linux servers:</b> Set <code>sftp.php</code> to mode <code>644</code> (readable by web server, not world-writable).
+</div>
+
+<h3>Step 4 — Verify the endpoint</h3>
+
+<p>Before connecting, verify the script is reachable and correctly configured. Open this URL in your browser:</p>
+<pre>https://example.com/sftp.php?op=PROBE</pre>
+
+<p>Expected responses:</p>
+<table border="1" cellpadding="5" cellspacing="0">
+  <tr><th>Response</th><th>Meaning</th></tr>
+  <tr><td>HTTP 200 with JSON containing <code>"status":"ok"</code></td><td>All good — proceed to connect</td></tr>
+  <tr><td>HTTP 401 Unauthorized</td><td>Script is running but waiting for auth — this is also OK (plugin will authenticate)</td></tr>
+  <tr><td>HTTP 503 Service Unavailable</td><td>PSK not configured — you uploaded the wrong file (without hash). Repeat from Step 2.</td></tr>
+  <tr><td>HTTP 404 Not Found</td><td>Wrong URL or file not uploaded yet</td></tr>
+  <tr><td>PHP error page</td><td>PHP version too old (&lt;7.4) or required extension disabled on server</td></tr>
+</table>
+
+<h3>Step 5 — Connect</h3>
+
+<p>Select your saved session in Total Commander and connect. The plugin probes the endpoint, confirms capabilities, and opens the remote file panel.</p>
+
+<h2>What is stored where — security summary</h2>
+
+<table border="1" cellpadding="5" cellspacing="0">
+  <tr><th>Location</th><th>What is stored</th><th>Is the password exposed?</th></tr>
+  <tr><td><code>sftpplug.ini</code> (on your PC)</td><td>Password encrypted with Windows DPAPI (user-account bound)</td><td>No — DPAPI ciphertext only</td></tr>
+  <tr><td><code>sftp.php</code> (on server)</td><td><code>AGENT_PSK_SALT</code> (random) + <code>AGENT_PSK_SHA256</code> = SHA-256(salt + password)</td><td>No — one-way hash only</td></tr>
+  <tr><td>Network traffic (HTTPS)</td><td>HMAC-SHA256 signature per request + timestamp + nonce</td><td>No — signature only; replay attacks blocked</td></tr>
+</table>
+
+<div class="note">
+  <b>In short:</b> Your password never appears in plain text in any file or on the network. Even if someone obtains <code>sftp.php</code> from the server, they cannot reverse the hash to get your password.
+</div>
+
+<h2>URL formats</h2>
+<pre>
+https://example.com/sftp.php
+https://example.com/tools/sftp.php
+https://example.com:8443/sftp.php
+http://192.168.1.10/sftp.php         (local testing only — no encryption)
+</pre>
+
+<h2>TAR Stream mode</h2>
+<p>When the <b>TAR stream</b> checkbox is enabled in the connection dialog, all directory downloads and batch file transfers are handled as a single TAR archive exchange instead of individual HTTP requests. This eliminates per-request overhead and is critical on shared hosting (OVH, home.pl) where thousands of individual GET/PUT requests would be extremely slow.</p>
+
+<h3>Batch Download (TAR_PACK)</h3>
+<p>When you copy multiple remote files or a remote directory to local, the plugin collects all file paths during the TC copy operation and sends a single <code>POST ?op=TAR_PACK</code> request with all paths listed in the body (one per line). The server-side <code>sftp.php</code> streams a ustar TAR archive of exactly those files directly to the response — without any temporary file or memory buffer. The plugin parses the TAR on the fly, creates local directories and files as each entry arrives, and shows a progress bar based on file count. GNU long-name entries (<code>././@LongLink</code>) are fully supported for paths over 99 characters.</p>
+
+<h3>Directory Download (TAR_STREAM)</h3>
+<p>When you copy an entire remote directory to local, the plugin sends one <code>GET ?op=TAR_STREAM&amp;path=...</code> request. The server streams a ustar TAR of the entire directory tree. The plugin parses and extracts on the fly.</p>
+
+<h3>Upload (TAR_EXTRACT)</h3>
+<p>When you copy multiple local files or directories to a remote location, the plugin batches all of them into a single ustar TAR stream and sends one <code>POST ?op=TAR_EXTRACT&amp;path=...</code> request. The server extracts the archive. Batching is transparent to Total Commander — files are queued during the copy operation and sent all at once when TC signals end-of-batch. The total archive size is sent as a proper 64-bit <code>Content-Length</code> header, so uploads of directories exceeding 4 GB work correctly.</p>
+
+<div class="note">
+  <b>Note:</b> TAR mode requires a current version of <code>sftp.php</code> on the server (one that supports <code>TAR_STREAM</code>, <code>TAR_EXTRACT</code>, and <code>TAR_PACK</code>). Always upload the <code>sftp.php</code> from the plugin directory — not an older copy. Resume is not supported for TAR transfers; if interrupted, re-copy the whole set.
+</div>
+
+<h2>Upload method and chunk size</h2>
+<p>When PHP Agent or PHP Shell mode is active, the connection dialog shows two extra controls (replacing the encoding codepage and system dropdowns):</p>
+<ul>
+  <li><b>Method</b> (Auto / POST / PUT) — HTTP verb used for single-file uploads.
+    <ul>
+      <li><b>Auto</b> (default): tries POST first, falls back to PUT if the server rejects it.</li>
+      <li><b>POST</b>: always uses multipart POST.</li>
+      <li><b>PUT</b>: always uses raw PUT body.</li>
+    </ul>
+  </li>
+  <li><b>Chunks</b> (Auto / 2 / 4 / 8 / 16 / 32 / 64 MiB) — upload chunk size per request.
+    <ul>
+      <li><b>Auto</b> (default): uses the <code>recommended_chunk_size</code> from the server's PROBE response, clamped to 1–64 MiB. Falls back to 1 MiB if the server does not advertise a recommendation.</li>
+      <li>Fixed sizes: override server recommendation when PHP limits or network conditions require it.</li>
+    </ul>
+  </li>
+</ul>
+
+<h2>Capabilities</h2>
+<ul>
+  <li><b>LIST</b> — directory listing with name, size, modification time, permissions</li>
+  <li><b>GET</b> — file download</li>
+  <li><b>PUT</b> — file upload (chunked)</li>
+  <li><b>DELETE / RMDIR</b> — remove files and directories</li>
+  <li><b>MKDIR</b> — create directories (recursive)</li>
+  <li><b>RENAME</b> — rename or move files</li>
+  <li><b>STAT</b> — file/directory info</li>
+  <li><b>HASH</b> — compute file hashes on server</li>
+  <li><b>TAR_STREAM</b> — stream entire directory tree as ustar TAR (download)</li>
+  <li><b>TAR_EXTRACT</b> — upload files/directories as ustar TAR (batch upload)</li>
+  <li><b>TAR_PACK</b> — pack selected remote files into ustar TAR (batch download)</li>
+  <li><b>SHELL_EXEC</b> — execute shell commands (PHP Shell mode; requires <code>shell_exec</code> enabled)</li>
+</ul>
+
+<h2>PHP Shell Console</h2>
+<p>If <code>shell_exec</code> is available on your server, you can use <b>PHP Shell (HTTP)</b> transfer mode for a pseudo-terminal experience:</p>
+<ul>
+  <li>Run shell commands from within Total Commander</li>
+  <li>Working directory tracking across commands</li>
+  <li>Command history (Up/Down arrows)</li>
+</ul>
+<p>Uses the same <code>sftp.php</code> file — no separate deployment needed.</p>
+
+<h2>Server requirements</h2>
+<ul>
+  <li>PHP 7.4 or later (PHP 8.x recommended)</li>
+  <li>Standard file and directory functions (<code>fopen</code>, <code>opendir</code>, etc.) — must not be in <code>disable_functions</code></li>
+  <li><code>hash</code> and <code>json</code> extensions (enabled by default on most hosts)</li>
+  <li>For PHP Shell: <code>shell_exec</code> or <code>proc_open</code> not disabled</li>
+</ul>
+
+<h2>PHP INI limits that affect uploads</h2>
+<ul>
+  <li><code>upload_max_filesize</code> — maximum size per chunk</li>
+  <li><code>post_max_size</code> — must be larger than <code>upload_max_filesize</code></li>
+  <li><code>max_execution_time</code> — increase for large files on slow servers</li>
+  <li><code>memory_limit</code> — 128 MB or more recommended</li>
+</ul>
+<p>The plugin reads these limits via PROBE and adjusts chunk size automatically.</p>
+
+<h2>Troubleshooting</h2>
+<table border="1" cellpadding="5" cellspacing="0">
+  <tr><th>Error</th><th>Cause</th><th>Fix</th></tr>
+  <tr><td>HTTP 503</td><td>Uploaded the raw sftp.php without PSK configured</td><td>Save session in plugin first, then re-upload the modified sftp.php from the plugin directory</td></tr>
+  <tr><td>HTTP 401</td><td>Password in plugin does not match hash in sftp.php</td><td>Re-save the session with the correct password, re-upload sftp.php</td></tr>
+  <tr><td>HTTP 404</td><td>sftp.php not at the URL you entered</td><td>Verify the URL and that the file was uploaded to the correct path</td></tr>
+  <tr><td>HTTP 500</td><td>PHP error on server</td><td>Check server PHP error log; verify PHP version ≥ 7.4 and required functions not disabled</td></tr>
+  <tr><td>Connection refused / timeout</td><td>Server unreachable or HTTPS certificate error</td><td>Test URL in browser; check SSL certificate validity</td></tr>
+  <tr><td>TAR batch download — 0 files received</td><td>Old <code>sftp.php</code> without <code>TAR_PACK</code> support, or path mismatch</td><td>Upload the current <code>sftp.php</code> from the plugin directory to the server</td></tr>
+  <tr><td>HTTP 504 on TAR download (OVH/home.pl)</td><td>Old <code>sftp.php</code> that buffers TAR in <code>php://temp</code> before sending</td><td>Upload the current <code>sftp.php</code> — streaming version eliminates the timeout</td></tr>
+  <tr><td>TAR upload fails for large directories (&gt;4 GB)</td><td>Old plugin build — 32-bit integer overflow in <code>Content-Length</code></td><td>Update the plugin to the current build</td></tr>
+</table>
+
+<h2>See also</h2>
+<ul>
+  <li><a href="php-agent-operations.html">PHP Agent Operations Reference</a> — complete API documentation</li>
+  <li><a href="php-shell.html">PHP Shell Console</a> — terminal interface guide</li>
+  <li><a href="security.html">Security Model</a> — security best practices</li>
+  <li><a href="troubleshooting-advanced.html">Advanced Troubleshooting</a> — PHP Agent issues</li>
+</ul>
+
+<p><a href="index.html">Back to index</a></p>
+</body>
+</html>
