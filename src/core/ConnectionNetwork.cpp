@@ -65,8 +65,10 @@ int EstablishSocketConnection(pConnectSettings ConnectSettings, LPCSTR connectto
                     break;
             }
         }
-        if (connected)
+        if (connected) {
+            EnableSocketKeepAlive(ConnectSettings->sock);
             break;
+        }
     }
     freeaddrinfo(res);
 

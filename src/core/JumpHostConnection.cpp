@@ -458,6 +458,7 @@ std::unique_ptr<ITransportStream> ConnectViaJumpHost(
             cs->feedback->ShowError(("ProxyJump: cannot connect to jump host: " + jump.host).c_str());
         return nullptr;
     }
+    EnableSocketKeepAlive(jmpSock);
     ShowStatusId(IDS_LOG_JUMP_TCP_OK, jump.host.c_str(), true);
 
     // -----------------------------------------------------------------------

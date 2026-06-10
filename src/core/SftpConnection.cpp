@@ -2,6 +2,7 @@
 // Maintainer: Marek Wesolowski (wesmar)
 #include "global.h"
 #include <windows.h>
+#include <mstcpip.h>
 #include <ws2tcpip.h>
 #include <shellapi.h>
 #include <commdlg.h>
@@ -220,6 +221,31 @@ void SetBlockingSocket(SOCKET s, bool blocking)
 {
     u_long arg = blocking ? 0 : 1;
     ioctlsocket(s, FIONBIO, &arg);
+}
+
+void EnableSocketKeepAlive(SOCKET s) noexcept
+{
+    if (s == INVALID_SOCKET)
+        return;
+
+    const BOOL keepAlive = TRUE;
+    if (setsockopt(s, SOL_SOCKET, SO_KEEPALIVE,
+                   reinterpret_cast<const char*>(&keepAlive), sizeof(keepAlive)) != 0) {
+        CONN_LOG("Enable SO_KEEPALIVE failed: WSA=%d", WSAGetLastError());
+        return;
+    }
+
+    tcp_keepalive ka{};
+    ka.onoff = 1;
+    ka.keepalivetime = TCP_KEEPALIVE_IDLE_MS;
+    ka.keepaliveinterval = TCP_KEEPALIVE_INTERVAL_MS;
+
+    DWORD bytesReturned = 0;
+    if (WSAIoctl(s, SIO_KEEPALIVE_VALS,
+                 &ka, sizeof(ka), nullptr, 0,
+                 &bytesReturned, nullptr, nullptr) != 0) {
+        CONN_LOG("Tune TCP keepalive failed: WSA=%d", WSAGetLastError());
+    }
 }
 
 bool IsSocketError(SOCKET s)

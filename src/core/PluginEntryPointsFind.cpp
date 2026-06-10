@@ -168,8 +168,6 @@ HANDLE WINAPI FsFindFirstW(LPCWSTR Path, LPWIN32_FIND_DATAW FindData)
         pConnectSettings new_serverid = nullptr;
         LPVOID sftpdataptr = nullptr;
 
-        // load server list if user connects directly via URL
-        LoadServersFromIniW(inifilenameW, s_quickconnect);
         // Disable reading only within an active server context.
         if (disablereading && IsMainThread()) {
             SetLastError(ERROR_NO_MORE_FILES);
@@ -179,6 +177,13 @@ HANDLE WINAPI FsFindFirstW(LPCWSTR Path, LPWIN32_FIND_DATAW FindData)
         GetDisplayNameFromPath(pathA.data(), displayName.data(), displayName.size() - 1);
         serverid = static_cast<pConnectSettings>(GetServerIdFromName(displayName.data(), GetCurrentThreadId()));
         bool wasconnected = serverid != nullptr;
+        if (!wasconnected) {
+            // Directory navigation hits FsFindFirstW frequently, so defer ini reload
+            // until we actually need to establish a new session.
+            LoadServersFromIniW(inifilenameW, s_quickconnect);
+            serverid = static_cast<pConnectSettings>(GetServerIdFromName(displayName.data(), GetCurrentThreadId()));
+            wasconnected = serverid != nullptr;
+        }
         if (!wasconnected) {
             new_serverid = SftpConnectToServer(displayName.data(), inifilename, nullptr);
             if (!new_serverid) {

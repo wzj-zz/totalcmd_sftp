@@ -560,7 +560,7 @@ int SftpFindFirstFileW(pConnectSettings cs, LPCWSTR remotedir, LPVOID* davdatapt
                     return SFTP_FAILED;
             }
         } else {
-            WaitForSshIo(cs);
+            WaitForSshIo(cs, DIRECTORY_IO_POLL_MS);
         }
 
         int delta = get_ticks_between(cs->findstarttime);
@@ -628,7 +628,7 @@ int SftpFindNextFileW(pConnectSettings cs, LPVOID davdataptr, LPWIN32_FIND_DATAW
             cs->neednewchannel = true;
             break;
         }
-        IsSocketReadable(cs->sock);
+        WaitForSshIo(cs, DIRECTORY_IO_POLL_MS);
     }
 
     if (rc > 0) {
@@ -700,7 +700,7 @@ int SftpFindClose(pConnectSettings cs, LPVOID davdataptr)
             cs->neednewchannel = true;
             break;
         }
-        IsSocketReadable(cs->sock);
+        WaitForSshIo(cs, DIRECTORY_IO_POLL_MS);
     }
     delete dirhandle;
     return SFTP_OK;
