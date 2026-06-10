@@ -37,6 +37,11 @@ constexpr int SFTP_PROGRESS_TIMEOUT_MS = 10000;
 constexpr int SFTP_SCP_CHANNEL_OPEN_TIMEOUT_MS = 20000;
 constexpr int64_t SFTP_SPEED_STATS_MIN_BYTES = 300LL * 1000LL * 1000LL;
 
+void ShowScpFallbackStatus()
+{
+    ShowStatus("SCP start failed, falling back to SFTP.");
+}
+
 // Helper: Open SFTP file with retry loop and timeout
 // Extracted to avoid duplication between download and upload paths
 std::unique_ptr<ISftpHandle> OpenSftpFileWithRetry(
@@ -358,15 +363,32 @@ int SftpDownloadFileW(pConnectSettings cs, LPCWSTR RemoteName, LPCWSTR LocalName
 
     if (useScp) {
         if (cs->scponly) {
-            // Shell SCP path
-            return ShellScpDownloadFile(cs, remotePath, RemoteName, local.get(), LocalName,
-                                        textMode, filesize, &loaded);
+            // Shell SCP path, with shell-transfer fallback for noisy/restricted hosts.
+            int scpRc = ShellScpDownloadFile(cs, BuildScpPathArgument(remotePath), RemoteName, local.get(), LocalName,
+                                             textMode, filesize, &loaded);
+            if (scpRc != SFTP_READFAILED)
+                return scpRc;
+
+            ShowStatus("SCP download failed, falling back to shell transfer.");
+            int64_t shellLoaded = loaded;
+            return ShellDdDownloadFile(cs, remotePath, RemoteName,
+                                       local.get(), LocalName, filesize, loaded, &shellLoaded);
         } else {
-            if (!OpenScpDownloadChannel(cs, BuildScpPathArgument(remotePath).c_str(), scpHandle, &scpInfo))
-                return SFTP_READFAILED;
-            scpRemain = scpInfo.st_size;
+            bool scpUnavailable = false;
+            if (!OpenScpDownloadChannel(cs, remotePath.c_str(), scpHandle, &scpInfo,
+                                        &scpUnavailable)) {
+                if (!scpUnavailable)
+                    return SFTP_READFAILED;
+                useScp = false;
+                ShowScpFallbackStatus();
+                ShowTransferStart(false, RemoteName, IDS_DOWNLOAD);
+            }
+            if (useScp)
+                scpRemain = scpInfo.st_size;
         }
-    } else {
+    }
+
+    if (!useScp) {
         sftpHandle = OpenSftpFileWithRetry(cs, remotePath.c_str(), LIBSSH2_FXF_READ, 0);
         if (!sftpHandle)
             return SFTP_READFAILED;
@@ -490,11 +512,19 @@ int SftpUploadFileW(pConnectSettings cs, LPCWSTR LocalName, LPCWSTR RemoteName,
             scpHandle = cs->session->scpSend64(remotePath.c_str(), cs->filemod,
                                                static_cast<uint64_t>(uploadSize), mtime, 0);
             if (!scpHandle) {
-                SftpLogLastError("SCP upload error: ", cs->session->lastErrno());
-                return SFTP_READFAILED;
+                const int scpErr = cs->session->lastErrno();
+                if (scpErr != LIBSSH2_ERROR_SCP_PROTOCOL) {
+                    SftpLogLastError("SCP upload error: ", scpErr);
+                    return SFTP_READFAILED;
+                }
+                useScp = false;
+                ShowScpFallbackStatus();
+                ShowTransferStart(false, RemoteName, IDS_UPLOAD);
             }
         }
-    } else {
+    }
+
+    if (!useScp) {
         unsigned long flags = LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT;
         if (!Resume)
             flags |= LIBSSH2_FXF_TRUNC;

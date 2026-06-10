@@ -30,6 +30,11 @@ static std::string LngStrA(UINT id, const char* fallback)
     return n > 0 ? std::string(buf.data(), static_cast<size_t>(n)) : (fallback ? fallback : "");
 }
 
+bool CanFallbackFromScpToSftp(pConnectSettings cs, int err)
+{
+    return cs && !cs->scponly && err == LIBSSH2_ERROR_SCP_PROTOCOL;
+}
+
 // SFTP_MAX_READ_SIZE, SFTP_MAX_WRITE_SIZE, SFTP_SCP_BLOCK_SIZE,
 // SFTP_SCP_READ_IDLE_TIMEOUT_MS, SFTP_SCP_WRITE_IDLE_TIMEOUT_MS
 // are defined in ScpTransferInternal.h
@@ -149,6 +154,40 @@ bool ParseScpCLine(const std::string& line, int64_t& outSize, std::string& outNa
     outName.assign(end);
     outSize = static_cast<int64_t>(sz);
     return true;
+}
+
+bool ReadScpDownloadStart(ScpChannel& scp, std::string& err, char& outType, DWORD timeoutMs)
+{
+    err.clear();
+    outType = 0;
+
+    for (int skippedLines = 0; skippedLines < 8; ++skippedLines) {
+        char ch = 0;
+        if (!scp.ReadByte(ch, timeoutMs))
+            return false;
+
+        if (ch == 'T' || ch == 'C' || ch == 'E' || ch == 1 || ch == 2) {
+            outType = ch;
+            return true;
+        }
+
+        if (ch == '\r' || ch == '\n')
+            continue;
+
+        std::string noise(1, ch);
+        std::string tail;
+        if (!scp.ReadLine(tail, timeoutMs))
+            return false;
+        noise += tail;
+        StripEscapeSequences(noise.data());
+        if (!noise.empty()) {
+            ShowStatus(noise.c_str());
+            err = noise;
+        }
+    }
+
+    err = LngStrA(IDS_SCP_PROTOCOL_ERROR, "SCP protocol error.");
+    return false;
 }
 
 } // anonymous namespace
@@ -285,8 +324,12 @@ std::string BuildScpPathArgument(const std::string& path)
 
 bool OpenScpDownloadChannel(pConnectSettings cs, const char* filename,
                             std::unique_ptr<ISshChannel>& outChannel,
-                            libssh2_struct_stat* outInfo)
+                            libssh2_struct_stat* outInfo,
+                            bool* outScpUnavailable)
 {
+    if (outScpUnavailable)
+        *outScpUnavailable = false;
+
     const auto start = std::chrono::steady_clock::now();
     bool didReconnect = false;
     std::unique_ptr<ISshChannel> scpCh;
@@ -321,6 +364,11 @@ bool OpenScpDownloadChannel(pConnectSettings cs, const char* filename,
                 }
                 break;
             } else if (err == LIBSSH2_ERROR_SCP_PROTOCOL) {
+                if (CanFallbackFromScpToSftp(cs, err)) {
+                    if (outScpUnavailable)
+                        *outScpUnavailable = true;
+                    break;
+                }
                 if (cs->feedback) {
                     cs->feedback->ShowError(
                         LngStrA(IDS_SCP_EXEC_FAILED, "Cannot execute SCP to start transfer. Please make sure that SCP is installed on the server and path to it is included in PATH.\n\nYou may also try SFTP instead of SCP (uncheck 'Use SCP for all' in connection settings).").c_str(),
@@ -363,22 +411,22 @@ int ShellScpDownloadFile(pConnectSettings cs,
     }
 
     ScpChannel scp(std::move(channel), cs);
-    std::string err;
-    if (!scp.SendAck(SFTP_SCP_WRITE_IDLE_TIMEOUT_MS) ||
-        !scp.ReadAck(err, SFTP_SCP_READ_IDLE_TIMEOUT_MS)) {
-        if (!err.empty()) ShowStatus(err.c_str());
+    if (!scp.SendAck(SFTP_SCP_WRITE_IDLE_TIMEOUT_MS)) {
         return SFTP_READFAILED;
     }
 
     int64_t remoteSize = hintedFileSize;
     bool gotDataHeader = false;
     bool lastWasCr = false;
+    std::string err;
     std::vector<char> dataBuf(SFTP_MAX_READ_SIZE * 2);
     const auto start = std::chrono::steady_clock::now();
 
     while (true) {
         char type = 0;
-        if (!scp.ReadByte(type, SFTP_SCP_READ_IDLE_TIMEOUT_MS)) {
+        if (!ReadScpDownloadStart(scp, err, type, SFTP_SCP_READ_IDLE_TIMEOUT_MS)) {
+            if (!err.empty())
+                ShowStatus(err.c_str());
             return SFTP_READFAILED;
         }
         if (type == 'T') {

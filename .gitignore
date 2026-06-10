@@ -1,56 +1,47 @@
-# Skrypty lokalne (nie wchodzą do repo)
+# Local helper scripts
 git-push.sh
 release-update.sh
 
-# Pliki środowiskowe
+# Environment files
 .env
 .env.*
 
-# Build outputs (generowane przez build.ps1 / MSBuild)
-build/bin/sftpplug.zip
-build/bin/sftpplug-installer.zip
-build/bin/*.wfx64
-build/bin/*.wfx
-build/bin/tc-installer/64/
-
-# MSBuild intermediate / output directories
-build/x64/
-build/Debug/
-build/Release/
-*.user
-
-# IDE
+# IDE and editor state
 .vs/
+.idea/
+.claude/
+*.user
 *.aps
 *.ncb
 *.suo
 *.sdf
 *.opensdf
-.idea/
-.claude/
-CLAUDE.md
-TODO.md
+*.VC.db
+*.VC.opendb
 
-# OS
+# OS clutter
 Thumbs.db
 Desktop.ini
 .DS_Store
 
-# thirdparty build artifacts (rebuilt by build-deps.ps1)
-# Submodule sources live in thirdparty/{openssl,libssh2,argon2}/ and are tracked via .gitmodules.
-# Out-of-tree build dirs and downloaded tools are local-only.
-thirdparty/build/
-thirdparty/tools/
-thirdparty/build-deps.log
-build.log
+# Local notes
+CLAUDE.md
+TODO.md
 
-# Static libs produced by build-deps.ps1 from OpenSSL + libssh2 + argon2 submodule sources.
-# Not tracked: ~107 MB of binaries that any contributor can regenerate locally.
-src/lib/libssh2_*.lib
-src/lib/libcrypto_*.lib
-src/lib/argon2_a_*.lib
-src/lib/ossl_static.pdb
+# MSBuild outputs
+/build/.intermediates/
+/build/bin/
 
-# Archiwa lokalne
-*.7z
-*.tar.gz
+# Release/package outputs
+/bin/*.zip
+/bin/*.7z
+/bin/*.tar.gz
+
+# Third-party rebuild outputs
+/thirdparty/build/
+/thirdparty/tools/
+/thirdparty/build-deps.log
+/build.log
+
+# Regenerated dependency libraries
+/src/lib/

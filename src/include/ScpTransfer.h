@@ -12,7 +12,8 @@ bool OpenScpDownloadChannel(
     pConnectSettings ConnectSettings,
     const char* filename,
     std::unique_ptr<ISshChannel>& outChannel,
-    libssh2_struct_stat* outInfo);
+    libssh2_struct_stat* outInfo,
+    bool* outScpUnavailable);
 
 int ShellDdDownloadFile(
     pConnectSettings cs,
