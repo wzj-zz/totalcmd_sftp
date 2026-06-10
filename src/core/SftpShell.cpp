@@ -277,7 +277,7 @@ bool EnsureScpShell(pConnectSettings cs)
         SetBlockingSocket(cs->sock, false);
 
     if (cs->scpShellChannel) {
-        if (cs->sock == INVALID_SOCKET || IsSocketError(cs->sock) || cs->scpShellChannel->eof()) {
+        if (IsSocketDisconnected(cs->sock) || cs->scpShellChannel->eof()) {
             CloseScpShell(cs);
         } else {
             return true;

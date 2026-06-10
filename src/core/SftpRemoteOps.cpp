@@ -7,6 +7,8 @@
 #include <array>
 #include <memory>
 #include <chrono>
+#include <algorithm>
+#include <cctype>
 #include "SftpClient.h"
 #include "PluginEntryPoints.h"
 #include "fsplugin.h"
@@ -30,6 +32,9 @@ constexpr int kScpDeleteReadTimeoutMs = 15000;
 constexpr int kSftpProgressStartMs = 2000;
 constexpr int kSftpAbortGraceMs = 2000;
 constexpr int kSftpProgressDivMs = 200;
+constexpr uint32_t kChecksumHandleMagic = 0x43484b31u; // CHK1
+constexpr const char* kChecksumBeginMarker = "__WFX_CHK_BEGIN__";
+constexpr const char* kChecksumEndMarker   = "__WFX_CHK_END__";
 
 struct ScpListState {
     std::vector<WIN32_FIND_DATAW> entries;
@@ -44,11 +49,224 @@ struct ScpData {
     std::unique_ptr<ScpListState> listingState;
 };
 
+struct RemoteChecksumHandle {
+    uint32_t magic = kChecksumHandleMagic;
+    std::string checksum;
+};
+
+struct EmptyChecksumEntry {
+    int type;
+    const char* hex;
+};
+
+constexpr EmptyChecksumEntry kEmptyChecksums[] = {
+    { FS_CHK_MD5,    "d41d8cd98f00b204e9800998ecf8427e" },
+    { FS_CHK_SHA1,   "da39a3ee5e6b4b0d3255bfef95601890afd80709" },
+    { FS_CHK_SHA256, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },
+    { FS_CHK_SHA512, "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e" },
+};
+
 ScpData* AsScpData(LPVOID data) noexcept
 {
     if (!data) return nullptr;
     ScpData* scpd = static_cast<ScpData*>(data);
     return (scpd->magic == kScpDataMagic) ? scpd : nullptr;
+}
+
+RemoteChecksumHandle* AsChecksumHandle(HANDLE h) noexcept
+{
+    if (!h)
+        return nullptr;
+    auto* data = static_cast<RemoteChecksumHandle*>(h);
+    return data->magic == kChecksumHandleMagic ? data : nullptr;
+}
+
+std::string ToRemotePathForShell(pConnectSettings cs, LPCWSTR pathW)
+{
+    std::array<char, wdirtypemax> tmp{};
+    CopyStringW2A(cs, pathW, tmp.data(), tmp.size());
+    ReplaceBackslashBySlash(tmp.data());
+    return std::string(tmp.data());
+}
+
+std::string BuildChecksumCommand(int checksumType, const std::string& remotePath, bool allowCompatPath)
+{
+    auto normalizedCompatPath = remotePath;
+    if (!normalizedCompatPath.empty() && normalizedCompatPath[0] == '/')
+        normalizedCompatPath = (normalizedCompatPath.size() == 1) ? "." : normalizedCompatPath.substr(1);
+
+    const std::string quotedPrimary = string_util::ShellQuoteSingle(remotePath);
+    const std::string quotedCompat = string_util::ShellQuoteSingle(normalizedCompatPath);
+
+    const char* sumCmd = nullptr;
+    const char* opensslAlg = nullptr;
+    switch (checksumType) {
+    case FS_CHK_MD5:
+        sumCmd = "md5sum";
+        opensslAlg = "md5";
+        break;
+    case FS_CHK_SHA1:
+        sumCmd = "sha1sum";
+        opensslAlg = "sha1";
+        break;
+    case FS_CHK_SHA256:
+        sumCmd = "sha256sum";
+        opensslAlg = "sha256";
+        break;
+    case FS_CHK_SHA512:
+        sumCmd = "sha512sum";
+        opensslAlg = "sha512";
+        break;
+    default:
+        return {};
+    }
+
+    std::string cmd = "(";
+    cmd += sumCmd;
+    cmd += " '";
+    cmd += quotedPrimary;
+    cmd += "' 2>/dev/null";
+    if (allowCompatPath && normalizedCompatPath != remotePath) {
+        cmd += " || ";
+        cmd += sumCmd;
+        cmd += " '";
+        cmd += quotedCompat;
+        cmd += "' 2>/dev/null";
+    }
+    cmd += " || openssl dgst -";
+    cmd += opensslAlg;
+    cmd += " '";
+    cmd += quotedPrimary;
+    cmd += "' 2>/dev/null";
+    if (allowCompatPath && normalizedCompatPath != remotePath) {
+        cmd += " || openssl dgst -";
+        cmd += opensslAlg;
+        cmd += " '";
+        cmd += quotedCompat;
+        cmd += "' 2>/dev/null";
+    }
+    cmd += ")";
+    return cmd;
+}
+
+bool RunSilentRemoteCommand(pConnectSettings cs, const std::string& cmd, std::string& reply)
+{
+    reply.clear();
+    if (!cs || !cs->session || cmd.empty())
+        return false;
+
+    auto channel = ConnectChannel(cs->session.get(), cs->sock);
+    if (!channel)
+        return false;
+    if (!SendChannelCommand(cs->session.get(), channel.get(), cmd.c_str(), cs->sock))
+        return false;
+
+    std::string errbuf;
+    std::string msgbuf;
+    std::array<char, 4096> linebuf{};
+    while (ReadChannelLine(channel.get(), linebuf.data(), linebuf.size() - 1, msgbuf, errbuf, cs->sock)) {
+        StripEscapeSequences(linebuf.data());
+        if (reply.empty())
+            reply.assign(linebuf.data());
+        else {
+            reply.push_back('\n');
+            reply.append(linebuf.data());
+        }
+    }
+
+    return channel->getExitStatus() == 0 && !reply.empty();
+}
+
+bool RunPersistentRemoteCommand(pConnectSettings cs, const std::string& cmd, DWORD timeoutMs, std::string& reply)
+{
+    reply.clear();
+    if (!cs || !cs->session || cmd.empty())
+        return false;
+    if (!EnsureScpShell(cs) || !cs->scpShellChannel)
+        return false;
+
+    cs->scpShellMsgBuf.clear();
+    cs->scpShellErrBuf.clear();
+
+    static unsigned checksumSeq = 1;
+    const unsigned seq = checksumSeq++;
+    std::string beginMarker = std::string(kChecksumBeginMarker) + "_" + std::to_string(seq);
+    std::string endMarker   = std::string(kChecksumEndMarker) + "_" + std::to_string(seq);
+    std::string fullCmd = "echo \"" + beginMarker + "\"; " + cmd + "; echo \"" + endMarker + "\":$?\n";
+
+    ISshChannel* channel = cs->scpShellChannel.get();
+    const auto writeStart = std::chrono::steady_clock::now();
+    size_t written = 0;
+    while (written < fullCmd.size()) {
+        int rc = static_cast<int>(channel->write(fullCmd.data() + written, fullCmd.size() - written));
+        if (rc > 0) {
+            written += static_cast<size_t>(rc);
+            continue;
+        }
+        if (rc != LIBSSH2_ERROR_EAGAIN)
+            return false;
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - writeStart).count() > kScpWriteTimeoutMs)
+            return false;
+        IsSocketReadable(cs->sock);
+    }
+
+    std::vector<std::string> lines;
+    if (!ScpReadCommandOutput(cs, endMarker.c_str(), lines, timeoutMs, beginMarker.c_str()))
+        return false;
+
+    for (const auto& line : lines) {
+        if (reply.empty())
+            reply = line;
+        else {
+            reply.push_back('\n');
+            reply += line;
+        }
+    }
+    return !reply.empty();
+}
+
+const char* GetEmptyChecksumHex(int checksumType) noexcept
+{
+    for (const auto& entry : kEmptyChecksums) {
+        if (entry.type == checksumType)
+            return entry.hex;
+    }
+    return nullptr;
+}
+
+size_t ExpectedChecksumHexLength(int checksumType) noexcept
+{
+    switch (checksumType) {
+    case FS_CHK_MD5: return 32;
+    case FS_CHK_SHA1: return 40;
+    case FS_CHK_SHA256: return 64;
+    case FS_CHK_SHA512: return 128;
+    default: return 0;
+    }
+}
+
+bool ExtractChecksumHex(std::string reply, int checksumType, std::string& outChecksum)
+{
+    outChecksum.clear();
+    const size_t wantLen = ExpectedChecksumHexLength(checksumType);
+    if (wantLen == 0)
+        return false;
+
+    StripEscapeSequences(reply.data());
+    std::string current;
+    for (char ch : reply) {
+        if (std::isxdigit(static_cast<unsigned char>(ch))) {
+            current.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+            continue;
+        }
+        if (current.size() == wantLen)
+            outChecksum = current;
+        current.clear();
+    }
+    if (current.size() == wantLen)
+        outChecksum = current;
+    return !outChecksum.empty();
 }
 
 // Parse SCP listing line into WIN32_FIND_DATAW
@@ -963,25 +1181,69 @@ bool SftpSupportsResume(pConnectSettings ConnectSettings)
 
 int SftpServerSupportsChecksumsW(pConnectSettings ConnectSettings, LPCWSTR RemoteName)
 {
-    (void)ConnectSettings;
     (void)RemoteName;
-    return 0;
+    if (!ConnectSettings || IsPhpAgentTransport(ConnectSettings) || IsLanPairTransport(ConnectSettings))
+        return 0;
+    return FS_CHK_MD5 | FS_CHK_SHA1 | FS_CHK_SHA256 | FS_CHK_SHA512;
 }
 
 HANDLE SftpStartFileChecksumW(int ChecksumType, pConnectSettings ConnectSettings, LPCWSTR RemoteName)
 {
-    (void)ChecksumType;
-    (void)ConnectSettings;
-    (void)RemoteName;
-    return nullptr;
+    if (!ConnectSettings || !RemoteName)
+        return nullptr;
+    if (!(ChecksumType == FS_CHK_MD5 || ChecksumType == FS_CHK_SHA1 ||
+          ChecksumType == FS_CHK_SHA256 || ChecksumType == FS_CHK_SHA512))
+        return nullptr;
+
+    if (ConnectSettings->sftpsession) {
+        std::string remotePathStat = ToRemotePathForShell(ConnectSettings, RemoteName);
+        LIBSSH2_SFTP_ATTRIBUTES attr{};
+        int statRc = 0;
+        do {
+            statRc = ConnectSettings->sftpsession->stat(remotePathStat.c_str(), &attr);
+            if (statRc == LIBSSH2_ERROR_EAGAIN)
+                IsSocketReadable(ConnectSettings->sock);
+        } while (statRc == LIBSSH2_ERROR_EAGAIN);
+        if (statRc == 0 && (attr.flags & LIBSSH2_SFTP_ATTR_SIZE) && attr.filesize == 0) {
+            const char* emptyHex = GetEmptyChecksumHex(ChecksumType);
+            if (emptyHex) {
+                auto data = std::make_unique<RemoteChecksumHandle>();
+                data->checksum = emptyHex;
+                return data.release();
+            }
+        }
+    }
+
+    const std::string remotePath = ToRemotePathForShell(ConnectSettings, RemoteName);
+    const std::string cmd = BuildChecksumCommand(ChecksumType, remotePath, ConnectSettings->scponly);
+    if (cmd.empty())
+        return nullptr;
+
+    std::string reply;
+    const bool preferPersistentShell = ConnectSettings->scponly || ConnectSettings->scpShellChannel != nullptr;
+    const bool commandOk = preferPersistentShell
+        ? (RunPersistentRemoteCommand(ConnectSettings, cmd, kScpReadTimeoutMs, reply) ||
+           RunSilentRemoteCommand(ConnectSettings, cmd, reply))
+        : (RunSilentRemoteCommand(ConnectSettings, cmd, reply) ||
+           RunPersistentRemoteCommand(ConnectSettings, cmd, kScpReadTimeoutMs, reply));
+    if (!commandOk)
+        return nullptr;
+
+    auto data = std::make_unique<RemoteChecksumHandle>();
+    if (!ExtractChecksumHex(reply, ChecksumType, data->checksum))
+        return nullptr;
+    return data.release();
 }
 
 int SftpGetFileChecksumResultW(bool WantResult, HANDLE ChecksumHandle, pConnectSettings ConnectSettings, LPSTR checksum, size_t maxlen)
 {
-    (void)WantResult;
-    (void)ChecksumHandle;
     (void)ConnectSettings;
+    RemoteChecksumHandle* data = AsChecksumHandle(ChecksumHandle);
+    if (!data)
+        return FS_CHK_ERR_FAIL;
     if (checksum && maxlen > 0)
-        checksum[0] = 0;
-    return FS_CHK_ERR_FAIL;
+        strlcpy(checksum, data->checksum.c_str(), maxlen);
+    if (WantResult)
+        delete data;
+    return 0;
 }

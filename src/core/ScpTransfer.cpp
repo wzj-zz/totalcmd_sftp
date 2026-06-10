@@ -304,7 +304,7 @@ bool ContainsNonAscii(LPCWSTR text) noexcept
 bool PrepareScpTransferSession(pConnectSettings cs)
 {
     if (!cs) return false;
-    if (cs->sock == INVALID_SOCKET || IsSocketError(cs->sock) || !cs->session) {
+    if (IsSocketDisconnected(cs->sock) || !cs->session) {
         Sleep(RECONNECT_SLEEP_MS);
         return ReconnectSFTPChannelIfNeeded(cs);
     }

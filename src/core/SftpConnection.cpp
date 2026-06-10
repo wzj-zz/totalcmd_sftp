@@ -231,6 +231,26 @@ bool IsSocketError(SOCKET s)
     return 1 == select(0, nullptr, nullptr, &fds, &timeout);
 }
 
+bool IsSocketDisconnected(SOCKET s)
+{
+    if (s == INVALID_SOCKET)
+        return true;
+    if (IsSocketError(s))
+        return true;
+    if (!IsSocketReadable(s))
+        return false;
+
+    char ch = 0;
+    const int rc = recv(s, &ch, 1, MSG_PEEK);
+    if (rc == 0)
+        return true;
+    if (rc > 0)
+        return false;
+
+    const int err = WSAGetLastError();
+    return err != WSAEWOULDBLOCK;
+}
+
 bool IsSocketWritable(SOCKET s)
 {
     fd_set fds;
@@ -837,8 +857,7 @@ bool ReconnectSFTPChannelIfNeeded(pConnectSettings ConnectSettings)
         // If the socket dropped or the session is gone, do a full reconnect so subsequent
         // ConnectChannel() calls have a live session to work with.
         bool sessionGone = !ConnectSettings->session;
-        bool sockLost    = (ConnectSettings->sock == INVALID_SOCKET)
-                        || IsSocketError(ConnectSettings->sock);
+        bool sockLost    = IsSocketDisconnected(ConnectSettings->sock);
         if (sessionGone || sockLost) {
             CONN_LOG("ReconnectSFTP(SCP): session/sock lost (gone=%d sockLost=%d), reconnecting",
                      sessionGone ? 1 : 0, sockLost ? 1 : 0);
@@ -851,6 +870,20 @@ bool ReconnectSFTPChannelIfNeeded(pConnectSettings ConnectSettings)
         }
         return ConnectSettings->session != nullptr;
     }
+
+    bool sessionGone = !ConnectSettings->session;
+    bool sockLost    = IsSocketDisconnected(ConnectSettings->sock);
+    if (sessionGone || sockLost) {
+        CONN_LOG("ReconnectSFTP: session/sock lost (gone=%d sockLost=%d), reconnecting",
+                 sessionGone ? 1 : 0, sockLost ? 1 : 0);
+        ShowStatusId(IDS_LOG_RECONNECT, nullptr, true);
+        SftpCloseConnection(ConnectSettings);
+        Sleep(RECONNECT_SLEEP_MS);
+        SftpConnect(ConnectSettings);
+        ConnectSettings->neednewchannel = ConnectSettings->sftpsession == nullptr;
+        return ConnectSettings->session != nullptr && ConnectSettings->sftpsession != nullptr;
+    }
+
     if (ConnectSettings->neednewchannel || ConnectSettings->sftpsession == nullptr) {
         ConnectSettings->neednewchannel = false;
         SYSTICKS starttime = get_sys_ticks();

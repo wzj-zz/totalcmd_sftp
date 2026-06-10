@@ -7,6 +7,7 @@
 #include <string>
 #include <chrono>
 #include <array>
+#include <limits>
 #include <ws2tcpip.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -40,6 +41,58 @@ constexpr int64_t SFTP_SPEED_STATS_MIN_BYTES = 300LL * 1000LL * 1000LL;
 void ShowScpFallbackStatus()
 {
     ShowStatus("SCP start failed, falling back to SFTP.");
+}
+
+std::unique_ptr<ISshChannel> TryOpenNativeScpUploadChannel(
+    pConnectSettings cs,
+    const std::string& remotePath,
+    int mode,
+    uint64_t uploadSize,
+    long mtime,
+    int* outLastErr)
+{
+    if (outLastErr)
+        *outLastErr = 0;
+    if (!cs || !cs->session)
+        return {};
+
+    const std::string scpCompatPath = BuildScpPathArgument(remotePath);
+
+    auto trySend64 = [&](const std::string& path) -> std::unique_ptr<ISshChannel> {
+        auto ch = cs->session->scpSend64(path.c_str(), mode, uploadSize, mtime, 0);
+        if (!ch && outLastErr)
+            *outLastErr = cs->session->lastErrno();
+        return ch;
+    };
+
+    auto channel = trySend64(remotePath);
+    if (channel)
+        return channel;
+
+    if (scpCompatPath != remotePath) {
+        channel = trySend64(scpCompatPath);
+        if (channel)
+            return channel;
+    }
+
+    if (uploadSize > static_cast<uint64_t>((std::numeric_limits<size_t>::max)()))
+        return {};
+
+    auto trySendEx = [&](const std::string& path) -> std::unique_ptr<ISshChannel> {
+        auto ch = cs->session->scpSendEx(path.c_str(), mode, static_cast<size_t>(uploadSize), mtime, 0);
+        if (!ch && outLastErr)
+            *outLastErr = cs->session->lastErrno();
+        return ch;
+    };
+
+    channel = trySendEx(remotePath);
+    if (channel)
+        return channel;
+
+    if (scpCompatPath != remotePath)
+        channel = trySendEx(scpCompatPath);
+
+    return channel;
 }
 
 // Helper: Open SFTP file with retry loop and timeout
@@ -509,16 +562,34 @@ int SftpUploadFileW(pConnectSettings cs, LPCWSTR LocalName, LPCWSTR RemoteName,
             long mtime = 0;
             if (setattr && GetFileTime(local.get(), nullptr, nullptr, &ft))
                 mtime = GetUnixTime(&ft);
-            scpHandle = cs->session->scpSend64(remotePath.c_str(), cs->filemod,
-                                               static_cast<uint64_t>(uploadSize), mtime, 0);
+            int scpErr = 0;
+            scpHandle = TryOpenNativeScpUploadChannel(cs, remotePath, cs->filemod,
+                                                      static_cast<uint64_t>(uploadSize), mtime, &scpErr);
             if (!scpHandle) {
-                const int scpErr = cs->session->lastErrno();
-                if (scpErr != LIBSSH2_ERROR_SCP_PROTOCOL) {
-                    SftpLogLastError("SCP upload error: ", scpErr);
-                    return SFTP_READFAILED;
+                SftpLogLastError("SCP upload error: ", scpErr);
+                int64_t shellUploaded = 0;
+                int shellScpRc = ShellScpUploadFile(cs, remotePath, RemoteName,
+                                                    local.get(), LocalName, uploadSize, textMode, &shellUploaded);
+                if (shellScpRc == SFTP_OK && cs->sftpsession != nullptr) {
+                    LIBSSH2_SFTP_ATTRIBUTES verifyAttr{};
+                    int verifyRc = 0;
+                    do {
+                        verifyRc = cs->sftpsession->stat(remotePath.c_str(), &verifyAttr);
+                        if (verifyRc == LIBSSH2_ERROR_EAGAIN)
+                            IsSocketReadable(cs->sock);
+                    } while (verifyRc == LIBSSH2_ERROR_EAGAIN);
+                    if (verifyRc == 0)
+                        return SFTP_OK;
+                    shellScpRc = SFTP_WRITEFAILED;
+                } else if (shellScpRc == SFTP_OK) {
+                    return SFTP_OK;
                 }
+
+                if (shellScpRc != SFTP_WRITEFAILED && shellScpRc != SFTP_READFAILED)
+                    return shellScpRc;
+
                 useScp = false;
-                ShowScpFallbackStatus();
+                ShowStatus("SCP upload failed, falling back to SFTP.");
                 ShowTransferStart(false, RemoteName, IDS_UPLOAD);
             }
         }
