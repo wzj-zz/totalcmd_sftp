@@ -75,8 +75,8 @@ Complete C-to-C++ rewrite of the original SFTP plugin by Christian Ghisler. Core
 | **Keyboard-Interactive** | Includes automated password-change-request handling. |
 | **PEM / OpenSSH** | Traditional private key formats, passed directly to libssh2. |
 | **PPK v2 / v3 (native)** | Built-in PuTTY key file parser. No external tools. BCrypt + Argon2d/i/id + AES-256-CBC. |
-| **Pageant** | SSH Agent integration. Auto-launch from `pageant.lnk` in the plugin directory. |
-| **Fallback chain** | Automatic progression: Pageant → key file → keyboard-interactive → password. |
+| **SSH agent (Pageant/OpenSSH)** | Windows SSH agent integration via libssh2. If Pageant is used, it can also be auto-launched from `pageant.lnk` in the plugin directory. |
+| **Fallback chain** | Automatic progression: SSH agent → key file → keyboard-interactive → password. |
 
 ### Security Primitives
 
@@ -318,7 +318,7 @@ Base64 encoder is self-contained (`ShellB64Encode` / `ShellB64Decode` in `ShellF
 
 ### Jump Host (ProxyJump)
 
-Handled in `JumpHostConnection.cpp`. Connects and authenticates to the bastion host, then opens a `direct-tcpip` channel to the final target. The full auth sequence (including PPK, Pageant, keyboard-interactive) runs on the jump host before the tunnel is established. No external `ssh.exe` binary involved.
+Handled in `JumpHostConnection.cpp`. Connects and authenticates to the bastion host, then opens a `direct-tcpip` channel to the final target. The full auth sequence (including PPK, SSH agent, keyboard-interactive) runs on the jump host before the tunnel is established. No external `ssh.exe` binary involved.
 
 **Pick existing session as jump host.** Next to the "Jump..." button on the F7 connection dialog there is a session-picker dropdown. Selecting an already-saved session uses its connection parameters (host, port, user, password, keys, agent) as the jump host — no need to retype them. The reference is stored as `jumpsessionref=<name>` in `sftpplug.ini` and resolved at connect time, so editing the referenced session propagates to every session that points at it (OpenSSH `ProxyJump` style). The "Jump..." button is disabled while a reference is active; pick `(none)` to switch back to manual configuration. Self-reference (picking the session being edited) is blocked at the UI level; chained or cyclic jump configurations are refused at connect time with a clear error.
 
@@ -341,8 +341,8 @@ File integrity verification directly on the server:
 
 ```mermaid
 flowchart TD
-    Start[Start Auth] --> P1{Pageant?}
-    P1 -->|Yes| P2[Pageant]
+    Start[Start Auth] --> P1{SSH agent?}
+    P1 -->|Yes| P2[SSH agent]
     P1 -->|No| K1[Key File]
     P2 -->|OK| Done[Auth OK]
     P2 -->|Fail| K1
@@ -385,9 +385,9 @@ Implemented in `PpkConverter.cpp`. Converts PuTTY Private Key files to tradition
 
 SSH wire format helpers (`AppendU32`, `AppendSshStr`, `ReadSshStr`) are implemented inline without any external parser library.
 
-### Pageant Integration
+### SSH Agent Integration
 
-Connects via named pipe to the running Pageant agent. If Pageant is not running and `pageant.lnk` exists in the plugin directory, the plugin launches it automatically before retrying agent auth.
+On Windows, libssh2 can use both Pageant and the built-in OpenSSH agent. Pageant is tried first, then OpenSSH. If Pageant is not running and `pageant.lnk` exists in the plugin directory, the plugin launches it automatically before retrying agent auth.
 
 ---
 

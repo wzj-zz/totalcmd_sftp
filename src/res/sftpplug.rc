@@ -34,7 +34,7 @@ BEGIN
     EDITTEXT        IDC_USERNAME,5,42,305,12,ES_AUTOHSCROLL
     LTEXT           "&Password:",IDC_PASSLABEL,5,58,54,8
     PUSHBUTTON      "?",IDC_PASSWORDHELP,43,57,12,10
-    CONTROL         "Use SSH agent (Pageant)",IDC_USEAGENT,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,170,58,135,8
+    CONTROL         "Use SSH agent (Pageant/OpenSSH)",IDC_USEAGENT,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,170,58,135,8
     PUSHBUTTON      "Change password...",IDC_EDITPASS,5,71,305,14,NOT WS_VISIBLE
     EDITTEXT        IDC_PASSWORD,5,68,305,12,ES_PASSWORD | ES_AUTOHSCROLL
     CONTROL         "Protect password with password manager (TC>=7.5)",IDC_CRYPTPASS,
@@ -165,7 +165,7 @@ BEGIN
     LTEXT           "Private key file (*.pem;*.ppk):",IDC_JUMP_LABEL_PRIVKEY,12,121,180,8
     EDITTEXT        IDC_JUMP_PRIVKEY,12,131,270,12,ES_AUTOHSCROLL
     PUSHBUTTON      ">>",IDC_JUMP_LOADPRIVKEY,284,131,16,12
-    CONTROL         "Use SSH &agent (Pageant) for jump host auth",IDC_JUMP_USEAGENT,
+    CONTROL         "Use SSH &agent (Pageant/OpenSSH) for jump host auth",IDC_JUMP_USEAGENT,
                     "Button",BS_AUTOCHECKBOX | WS_TABSTOP,12,149,286,10
     DEFPUSHBUTTON   "OK",IDOK,205,163,50,14
     PUSHBUTTON      "Cancel",IDCANCEL,260,163,50,14
@@ -476,7 +476,7 @@ BEGIN
     IDS_JUMP_DLG_PASS       "&Password:"
     IDS_JUMP_DLG_PUBKEY     "Public key file (*.pub):"
     IDS_JUMP_DLG_PRIVKEY    "Private key file (*.pem;*.ppk):"
-    IDS_JUMP_DLG_USEAGENT   "Use SSH &agent (Pageant) for jump host auth"
+    IDS_JUMP_DLG_USEAGENT   "Use SSH &agent (Pageant/OpenSSH) for jump host auth"
     IDS_BTN_HELP            "Help"
     IDS_BTN_CANCEL          "Cancel"
     IDS_DLG_PHP_TAR         "TAR stream"
@@ -551,7 +551,7 @@ BEGIN
                             "Failed to convert .ppk: wrong passphrase or corrupted key."
     IDS_LOG_PPK_ERR_GENERIC "Failed to convert .ppk."
     IDS_LOG_PPK_CONVERTING  "Converting PPK file..."
-    IDS_LOG_PAGEANT_TIMEOUT "Pageant authentication timed out."
+    IDS_LOG_PAGEANT_TIMEOUT "SSH agent authentication timed out."
     IDS_LOG_PUBKEY_TIMEOUT  "Public key authentication timed out."
     IDS_LOG_JUMP_NO_FP      "Jump host: failed to get fingerprint"
     IDS_LOG_JUMP_AUTH_NONE  "Jump host: already authenticated (no auth needed)"
@@ -753,8 +753,8 @@ STRINGTABLE
 BEGIN
     IDS_20866               "Cyrillic KOI8-R (20866)"
     IDS_OTHER               "Other (enter manually)"
-    IDS_SSH2_TOO_OLD        "Library libssh2.dll is too old for Pageant functions!\nMinimum required version is %s."
-    IDS_AGENT_CONNECTERROR  "Failure connecting to ssh-agent (Pageant)!\nYou can put a link file named pageant.lnk in the plugin directory to launch pageant, e.g. pointing to\nc:\\path\\pageant.exe keyfilename"
+    IDS_SSH2_TOO_OLD        "Library libssh2.dll is too old for SSH agent functions!\nMinimum required version is %s."
+    IDS_AGENT_CONNECTERROR  "Failure connecting to SSH agent (Pageant/OpenSSH)!\nIf you use Pageant, you can put a link file named pageant.lnk in the plugin directory to launch it, e.g. pointing to\nc:\\path\\pageant.exe keyfilename"
     IDS_AGENT_REQUESTIDENTITIES 
                             "Failure requesting identities from ssh-agent!"
     IDS_AGENT_AUTHFAILED    "Agent authentication failed!"
@@ -807,7 +807,7 @@ BEGIN
     IDS_DLG_CAPTION         "Connect to SFTP Server"
     IDS_DLG_CONNECTTO       "&Connect to: (server/path or server:port/path)"
     IDS_DLG_USERNAME        "&User name:"
-    IDS_DLG_USEAGENT        "Use SSH agent (Pageant)"
+    IDS_DLG_USEAGENT        "Use SSH agent (Pageant/OpenSSH)"
 END
 
 STRINGTABLE
@@ -881,4 +881,3 @@ END
 
 /////////////////////////////////////////////////////////////////////////////
 #endif    // not APSTUDIO_INVOKED
-

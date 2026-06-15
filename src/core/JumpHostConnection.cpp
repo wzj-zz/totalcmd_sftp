@@ -307,7 +307,7 @@ static bool AuthJumpHost(
             agent->listIdentities();
             struct libssh2_agent_publickey* prev = nullptr;
             struct libssh2_agent_publickey* id   = nullptr;
-            while (agent->getIdentity(&id, prev) == 1) {
+            while (agent->getIdentity(&id, prev) == 0) {
                 int r = LIBSSH2_ERROR_EAGAIN;
                 while (r == LIBSSH2_ERROR_EAGAIN) {
                     r = agent->userauth(jump.user.c_str(), id);
