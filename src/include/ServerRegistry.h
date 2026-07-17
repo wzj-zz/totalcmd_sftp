@@ -21,6 +21,9 @@ int  CopyMoveServerInIni(LPCSTR oldservername, LPCSTR newservername, bool Move, 
 
 // Server id lookup / registration
 SERVERID GetServerIdFromName(LPCSTR servername, DWORD threadid) noexcept;
+// Finds an active connection by its display name regardless of the TC worker
+// thread that owns it. Used when TC copies between two plugin panels.
+SERVERID GetServerIdFromAnyThread(LPCSTR servername) noexcept;
 bool SetServerIdForName(LPCSTR displayname, SERVERID newid) noexcept;
 
 // Path helpers

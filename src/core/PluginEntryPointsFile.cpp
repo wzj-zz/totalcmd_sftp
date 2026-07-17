@@ -6,6 +6,7 @@
 #include <string>
 #include <string_view>
 #include <algorithm>
+#include <vector>
 #include "fsplugin.h"
 #include "CoreUtils.h"
 #include "res/resource.h"
@@ -18,6 +19,179 @@
 #include "LanPairSession.h"
 #include "PluginEntryPointsInternal.h"
 #include "PhpAgentClient.h"
+#include "ScpTransferInternal.h"
+#include "TransferUtils.h"
+
+namespace {
+
+std::unique_ptr<ISftpHandle> OpenRemoteSftpFileWithRetry(pConnectSettings connection,
+                                                          const std::string& path,
+                                                          unsigned long flags,
+                                                          long mode)
+{
+    if (!connection || !connection->sftpsession)
+        return {};
+
+    const SYSTICKS start = get_sys_ticks();
+    while (true) {
+        std::unique_ptr<ISftpHandle> handle;
+        {
+            ScopedSshSessionUse sessionUse(connection);
+            handle = connection->sftpsession->open(path.c_str(), flags, mode);
+        }
+        if (handle)
+            return handle;
+
+        const int error = connection->session ? connection->session->lastErrno() : 0;
+        if (error != LIBSSH2_ERROR_EAGAIN && error != 0)
+            return {};
+        if (EscapePressed() || get_ticks_between(start) > 20000)
+            return {};
+        WaitForSshIo(connection, DIRECTORY_IO_POLL_MS);
+    }
+}
+
+int CopyBetweenSftpSessionsW(pConnectSettings source, LPCWSTR sourceName,
+                             LPCWSTR sourcePath, pConnectSettings target,
+                             LPCWSTR targetName, LPCWSTR targetPath,
+                             int64_t fileSize, bool overwrite)
+{
+    auto fail = [](int result, const std::string& message) -> int {
+        LogMsg("%s", message.c_str());
+        ShowError(message.c_str());
+        return result;
+    };
+
+    // TC invokes FsGetFile for plugin-to-plugin copies, passing the destination
+    // virtual path as LocalName. Stream it directly instead of treating it as a
+    // Windows path.
+    if (!source || !target ||
+        IsPhpAgentTransport(source) || IsPhpAgentTransport(target) ||
+        IsLanPairTransport(source) || IsLanPairTransport(target) ||
+        source->scponly || target->scponly) {
+        return fail(FS_FILE_NOTSUPPORTED, "Remote copy is unsupported by the selected transport.");
+    }
+
+    {
+        ScopedSshSessionUse sourceUse(source);
+        if (!ReconnectSFTPChannelIfNeeded(source))
+            return fail(FS_FILE_READERROR, "Remote copy could not reconnect the source SFTP session.");
+    }
+    {
+        ScopedSshSessionUse targetUse(target);
+        if (!ReconnectSFTPChannelIfNeeded(target))
+            return fail(FS_FILE_WRITEERROR, "Remote copy could not reconnect the target SFTP session.");
+    }
+    if (!source->sftpsession || !target->sftpsession) {
+        return fail(FS_FILE_NOTSUPPORTED, "Remote copy could not initialize both SFTP sessions.");
+    }
+
+    const std::string sourceRemotePath = ToRemotePathA(source, sourcePath);
+    const std::string targetRemotePath = ToRemotePathA(target, targetPath);
+    if (source == target && sourceRemotePath == targetRemotePath)
+        return FS_FILE_OK;
+
+    std::unique_ptr<ISftpHandle> input = OpenRemoteSftpFileWithRetry(
+        source, sourceRemotePath, LIBSSH2_FXF_READ, 0);
+    if (!input) {
+        return fail(FS_FILE_READERROR, "Remote copy could not open source: " + sourceRemotePath);
+    }
+
+    unsigned long targetFlags = LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT;
+    targetFlags |= overwrite ? LIBSSH2_FXF_TRUNC : LIBSSH2_FXF_EXCL;
+    std::unique_ptr<ISftpHandle> output = OpenRemoteSftpFileWithRetry(
+        target, targetRemotePath, targetFlags, 0644);
+    if (!output) {
+        const unsigned long sftpError = target->sftpsession->lastError();
+        const std::string message = "Remote copy could not open target: " + targetRemotePath +
+            " (SFTP status " + std::to_string(sftpError) + ").";
+        if (!overwrite && sftpError == LIBSSH2_FX_FILE_ALREADY_EXISTS)
+            return FS_FILE_EXISTSRESUMEALLOWED;
+        return fail(FS_FILE_WRITEERROR, message);
+    }
+
+    std::vector<char> buffer(SFTP_MAX_READ_SIZE * 4);
+    int64_t transferred = 0;
+    int result = FS_FILE_OK;
+    while (result == FS_FILE_OK) {
+        ssize_t read = 0;
+        {
+            ScopedSshSessionUse sourceUse(source);
+            read = input->read(buffer.data(), buffer.size());
+        }
+        if (read == 0)
+            break;
+        if (read == LIBSSH2_ERROR_EAGAIN) {
+            WaitForSshIo(source, DIRECTORY_IO_POLL_MS);
+            continue;
+        }
+        if (read < 0) {
+            result = fail(FS_FILE_READERROR, "Remote copy read failed for " + sourceRemotePath +
+                          " (error " + std::to_string(read) + ").");
+            break;
+        }
+
+        size_t written = 0;
+        while (written < static_cast<size_t>(read)) {
+            ssize_t write = 0;
+            {
+                ScopedSshSessionUse targetUse(target);
+                write = output->write(buffer.data() + written, static_cast<size_t>(read) - written);
+            }
+            if (write == LIBSSH2_ERROR_EAGAIN) {
+                WaitForSshIo(target, DIRECTORY_IO_POLL_MS);
+                continue;
+            }
+            if (write <= 0) {
+                result = fail(FS_FILE_WRITEERROR, "Remote copy write failed for " + targetRemotePath +
+                              " (error " + std::to_string(write) + ").");
+                break;
+            }
+            written += static_cast<size_t>(write);
+        }
+
+        transferred += read;
+        if (result == FS_FILE_OK &&
+            UpdatePercentBar(source, GetPercent(transferred, fileSize), sourceName, targetName))
+            result = FS_FILE_USERABORT;
+    }
+
+    return result;
+}
+
+void GetRemotePathPartsW(LPCWSTR path, std::array<char, wdirtypemax>& serverName,
+                         std::array<WCHAR, wdirtypemax>& relativePath)
+{
+    const std::wstring_view pathView(path ? path : L"");
+    const size_t firstName = pathView.find_first_not_of(L"\\/");
+    if (firstName == std::wstring_view::npos)
+        return;
+
+    const size_t separator = pathView.find_first_of(L"\\/", firstName);
+    const std::wstring_view name = separator == std::wstring_view::npos
+        ? pathView.substr(firstName)
+        : pathView.substr(firstName, separator - firstName);
+    walcopy(serverName.data(), std::wstring(name).c_str(), serverName.size() - 1);
+    if (separator != std::wstring_view::npos) {
+        const std::wstring_view relative = pathView.substr(separator);
+        const size_t length = (std::min)(relative.size(), relativePath.size() - 1);
+        wmemcpy(relativePath.data(), relative.data(), length);
+        relativePath[length] = L'\0';
+    } else {
+        wcslcpy(relativePath.data(), L"\\", relativePath.size() - 1);
+    }
+}
+
+void CloseTemporaryConnection(pConnectSettings connection) noexcept
+{
+    if (!connection)
+        return;
+    SftpCloseConnection(connection);
+    StopSshKeepAlive(connection);
+    delete connection;
+}
+
+} // namespace
 
 int WINAPI FsExecuteFileW(HWND MainWin, LPWSTR RemoteName, LPCWSTR Verb)
 {
@@ -189,6 +363,11 @@ int WINAPI FsRenMovFileW(LPCWSTR OldName, LPCWSTR NewName, BOOL Move, BOOL OverW
 {
     sftp::DllExceptionBarrier _barrier;
     return sftp::dll_invoke(_barrier, FS_FILE_WRITEERROR, [&]() -> int {
+        SFTP_LOG("REMOTE_COPY", "FsRenMovFileW old='%S' new='%S' move=%d overwrite=%d",
+                 OldName ? OldName : L"(null)", NewName ? NewName : L"(null)", Move ? 1 : 0, OverWrite ? 1 : 0);
+        if (!OldName || !NewName || !ri)
+            return FS_FILE_WRITEERROR;
+
         // Use std::wstring instead of std::array<WCHAR, wdirtypemax>
         std::wstring olddir(wdirtypemax, L'\0');
         std::wstring newdir(wdirtypemax, L'\0');
@@ -217,14 +396,48 @@ int WINAPI FsRenMovFileW(LPCWSTR OldName, LPCWSTR NewName, BOOL Move, BOOL OverW
             return FS_FILE_NOTFOUND;
         }
 
-        pConnectSettings serverid1 = GetServerIdAndRelativePathFromPathW(OldName, olddir.data(), olddir.size() - 1);
-        pConnectSettings serverid2 = GetServerIdAndRelativePathFromPathW(NewName, newdir.data(), newdir.size() - 1);
-        olddir.resize(wcslen(olddir.data()));
-        newdir.resize(wcslen(newdir.data()));
+        std::array<char, wdirtypemax> sourceName{};
+        std::array<char, wdirtypemax> targetName{};
+        std::array<WCHAR, wdirtypemax> sourcePath{};
+        std::array<WCHAR, wdirtypemax> targetPath{};
+        GetRemotePathPartsW(OldName, sourceName, sourcePath);
+        GetRemotePathPartsW(NewName, targetName, targetPath);
+        olddir.assign(sourcePath.data());
+        newdir.assign(targetPath.data());
 
-        // Source and destination must be on the same server.
-        if (serverid1 != serverid2 || serverid1 == nullptr)
-            return FS_FILE_NOTFOUND;
+        pConnectSettings serverid1 = static_cast<pConnectSettings>(GetServerIdFromName(sourceName.data(), GetCurrentThreadId()));
+        if (!serverid1)
+            serverid1 = static_cast<pConnectSettings>(GetServerIdFromAnyThread(sourceName.data()));
+        std::unique_ptr<tConnectSettings, decltype(&CloseTemporaryConnection)> temporarySource(nullptr, CloseTemporaryConnection);
+        if (!serverid1 && sourceName[0]) {
+            serverid1 = SftpConnectToServer(sourceName.data(), inifilename, nullptr);
+            if (serverid1)
+                temporarySource.reset(serverid1);
+        }
+
+        pConnectSettings serverid2 = static_cast<pConnectSettings>(GetServerIdFromName(targetName.data(), GetCurrentThreadId()));
+        if (!serverid2)
+            serverid2 = static_cast<pConnectSettings>(GetServerIdFromAnyThread(targetName.data()));
+        std::unique_ptr<tConnectSettings, decltype(&CloseTemporaryConnection)> temporaryTarget(nullptr, CloseTemporaryConnection);
+        if (!serverid2 && targetName[0]) {
+            serverid2 = SftpConnectToServer(targetName.data(), inifilename, nullptr);
+            if (serverid2)
+                temporaryTarget.reset(serverid2);
+        }
+        if (!serverid1 || !serverid2)
+            return FS_FILE_WRITEERROR;
+
+        if (serverid1 != serverid2) {
+            if (ri->Attr & FILE_ATTRIBUTE_DIRECTORY)
+                return FS_FILE_NOTSUPPORTED;
+            const int copyResult = CopyBetweenSftpSessionsW(serverid1, OldName, olddir.c_str(),
+                                                            serverid2, NewName, newdir.c_str(),
+                                                            ri->Size64, !!OverWrite);
+            if (copyResult != FS_FILE_OK || !Move)
+                return copyResult;
+            return SftpDeleteFileW(serverid1, olddir.c_str(), false) == SFTP_OK
+                ? FS_FILE_OK : FS_FILE_WRITEERROR;
+        }
 
         ResetLastPercent(serverid1);
         SessionContextGuard _sessionGuard(serverid1);
@@ -328,6 +541,9 @@ int WINAPI FsGetFileW(LPCWSTR RemoteName, LPWSTR LocalName, int CopyFlags, Remot
         SFTP_LOG("ENTRY", "FsGetFileW start flags=0x%x overwrite=%d resume=%d move=%d shift=%d",
                  CopyFlags, OverWrite ? 1 : 0, Resume ? 1 : 0, Move ? 1 : 0,
                  (GetAsyncKeyState(VK_SHIFT) & 0x8000) ? 1 : 0);
+        SFTP_LOG("REMOTE_COPY", "FsGetFileW source='%S' target='%S' tid=%lu",
+                 RemoteName ? RemoteName : L"(null)", LocalName ? LocalName : L"(null)",
+                 static_cast<unsigned long>(GetCurrentThreadId()));
 
         const std::wstring_view remoteView = RemoteName ? std::wstring_view(RemoteName) : std::wstring_view{};
         if (remoteView.size() < 3 || !LocalName || !ri)
@@ -337,12 +553,56 @@ int WINAPI FsGetFileW(LPCWSTR RemoteName, LPWSTR LocalName, int CopyFlags, Remot
             return CreateHelpFileLocalW(LocalName, OverWrite);
         }
 
-        SanitizeLocalFileNameW(LocalName);
-
-        std::wstring remotedir(wdirtypemax, L'\0');
-        pConnectSettings serverid = GetServerIdAndRelativePathFromPathW(RemoteName, remotedir.data(), remotedir.size() - 1);
-        if (serverid == nullptr)
+        std::array<char, wdirtypemax> sourceName{};
+        std::array<WCHAR, wdirtypemax> remotedir{};
+        GetRemotePathPartsW(RemoteName, sourceName, remotedir);
+        SFTP_LOG("REMOTE_COPY", "source session='%s' path='%S'", sourceName.data(), remotedir.data());
+        pConnectSettings serverid = static_cast<pConnectSettings>(GetServerIdFromName(sourceName.data(), GetCurrentThreadId()));
+        if (!serverid)
+            serverid = static_cast<pConnectSettings>(GetServerIdFromAnyThread(sourceName.data()));
+        std::unique_ptr<tConnectSettings, decltype(&CloseTemporaryConnection)> temporarySource(nullptr, CloseTemporaryConnection);
+        if (!serverid && sourceName[0] != '\0') {
+            LogMsg("Remote copy source session '%s' is not active; opening a temporary connection.", sourceName.data());
+            serverid = SftpConnectToServer(sourceName.data(), inifilename, nullptr);
+            if (serverid)
+                temporarySource.reset(serverid);
+        }
+        if (!serverid) {
+            ShowError((std::string("Remote copy could not open the source session: ") + sourceName.data()).c_str());
             return FS_FILE_READERROR;
+        }
+
+        std::array<char, wdirtypemax> targetName{};
+        std::array<WCHAR, wdirtypemax> targetdir{};
+        const bool virtualTarget = LocalName[0] == L'\\' && LocalName[1] != L'\\';
+        if (virtualTarget)
+            GetRemotePathPartsW(LocalName, targetName, targetdir);
+        SFTP_LOG("REMOTE_COPY", "target session='%s' path='%S' virtual=%d", targetName.data(), targetdir.data(), virtualTarget ? 1 : 0);
+        pConnectSettings targetServer = nullptr;
+        if (virtualTarget)
+            targetServer = static_cast<pConnectSettings>(GetServerIdFromName(targetName.data(), GetCurrentThreadId()));
+        if (virtualTarget && !targetServer)
+            targetServer = static_cast<pConnectSettings>(GetServerIdFromAnyThread(targetName.data()));
+        std::unique_ptr<tConnectSettings, decltype(&CloseTemporaryConnection)> temporaryTarget(nullptr, CloseTemporaryConnection);
+        if (virtualTarget && !targetServer && targetName[0] != '\0') {
+            LogMsg("Remote copy target session '%s' is not active; opening a temporary connection.", targetName.data());
+            targetServer = SftpConnectToServer(targetName.data(), inifilename, nullptr);
+            if (targetServer)
+                temporaryTarget.reset(targetServer);
+        }
+        if (targetServer) {
+            if (Resume)
+                return FS_FILE_NOTSUPPORTED;
+            return CopyBetweenSftpSessionsW(serverid, RemoteName, remotedir.data(),
+                                            targetServer, LocalName, targetdir.data(),
+                                            ri->Size64, OverWrite);
+        }
+        if (virtualTarget) {
+            ShowError((std::string("Remote copy could not open the target session: ") + targetName.data()).c_str());
+            return FS_FILE_WRITEERROR;
+        }
+
+        SanitizeLocalFileNameW(LocalName);
 
         // Prefix all ShowStatus output in this thread with "[<session>] ".
         SessionContextGuard _sessionGuard(serverid);

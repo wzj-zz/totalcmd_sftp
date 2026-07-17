@@ -55,6 +55,19 @@ SERVERID GetServerIdFromName(LPCSTR name, DWORD threadId) noexcept
     return entry ? entry->serverid : nullptr;
 }
 
+SERVERID GetServerIdFromAnyThread(LPCSTR name) noexcept
+{
+    if (!name || !name[0])
+        return nullptr;
+
+    std::lock_guard<std::mutex> lock(g_registryMutex);
+    for (const auto& entry : g_servers) {
+        if (_stricmp(entry->name.c_str(), name) == 0)
+            return entry->serverid;
+    }
+    return nullptr;
+}
+
 bool SetServerIdForName(LPCSTR name, SERVERID id) noexcept
 {
     if (!name || !name[0])
