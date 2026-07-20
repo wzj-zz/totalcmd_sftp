@@ -21,6 +21,7 @@
 #include "PhpAgentClient.h"
 #include "ScpTransferInternal.h"
 #include "TransferUtils.h"
+#include "SftpArchivePipe.h"
 
 namespace {
 
@@ -431,12 +432,17 @@ int WINAPI FsRenMovFileW(LPCWSTR OldName, LPCWSTR NewName, BOOL Move, BOOL OverW
             if (ri->Attr & FILE_ATTRIBUTE_DIRECTORY)
                 return FS_FILE_NOTSUPPORTED;
             const int copyResult = CopyBetweenSftpSessionsW(serverid1, OldName, olddir.c_str(),
-                                                            serverid2, NewName, newdir.c_str(),
-                                                            ri->Size64, !!OverWrite);
-            if (copyResult != FS_FILE_OK || !Move)
+                                                             serverid2, NewName, newdir.c_str(),
+                                                             ri->Size64, !!OverWrite);
+            if (copyResult != FS_FILE_OK)
                 return copyResult;
-            return SftpDeleteFileW(serverid1, olddir.c_str(), false) == SFTP_OK
-                ? FS_FILE_OK : FS_FILE_WRITEERROR;
+            InvalidateSftpManifestCache(serverid2);
+            if (!Move)
+                return FS_FILE_OK;
+            if (SftpDeleteFileW(serverid1, olddir.c_str(), false) != SFTP_OK)
+                return FS_FILE_WRITEERROR;
+            InvalidateSftpManifestCache(serverid1);
+            return FS_FILE_OK;
         }
 
         ResetLastPercent(serverid1);
@@ -455,6 +461,7 @@ int WINAPI FsRenMovFileW(LPCWSTR OldName, LPCWSTR NewName, BOOL Move, BOOL OverW
         int rc = SftpRenameMoveFileW(serverid1, olddir.data(), newdir.data(), !!Move, !!OverWrite, isdir);
         switch (rc) {
         case SFTP_OK:
+            InvalidateSftpManifestCache(serverid1);
             return FS_FILE_OK;
         case SFTP_EXISTS:
             return FS_FILE_EXISTS;
@@ -764,7 +771,9 @@ int WINAPI FsPutFileW(LPCWSTR LocalName, LPCWSTR RemoteName, int CopyFlags)
         int rc = SftpUploadFileW(serverid, LocalName, remotedir.data(), Resume, setattr);
         SFTP_LOG("ENTRY", "FsPutFileW SftpUploadFileW rc=%d", rc);
         switch (rc) {
-            case SFTP_OK:          return FS_FILE_OK;
+            case SFTP_OK:
+                InvalidateSftpManifestCache(serverid);
+                return FS_FILE_OK;
             case SFTP_EXISTS:      return SftpSupportsResume(serverid) ? FS_FILE_EXISTSRESUMEALLOWED : FS_FILE_EXISTS;
             case SFTP_READFAILED:  return FS_FILE_READERROR;
             case SFTP_WRITEFAILED: return FS_FILE_WRITEERROR;
@@ -810,6 +819,8 @@ BOOL WINAPI FsDeleteFileW(LPCWSTR RemoteName)
                 return serverid->lanSession->remove(LanRemotePathToUtf8(remotedir.data()));
             }
             int rc = SftpDeleteFileW(serverid, remotedir.data(), false);
+            if (rc == SFTP_OK)
+                InvalidateSftpManifestCache(serverid);
             return (rc == SFTP_OK) ? true : false;
         }
         // delete server
@@ -863,6 +874,8 @@ BOOL WINAPI FsRemoveDirW(LPCWSTR RemoteName)
                 return serverid->lanSession->remove(LanRemotePathToUtf8(remotedir.data()));
             }
             int rc = SftpDeleteFileW(serverid, remotedir.data(), true);
+            if (rc == SFTP_OK)
+                InvalidateSftpManifestCache(serverid);
             return (rc == SFTP_OK) ? true : false;
         }
         return false;
@@ -901,6 +914,8 @@ BOOL WINAPI FsSetAttrW(LPCWSTR RemoteName, int NewAttr)
         walcopy(remotedirA.data(), remotedirW.data(), remotedirA.size() - 1);
         remotedirA.resize(strlen(remotedirA.data()));
         int rc = SftpSetAttr(serverid, remotedirA.data(), NewAttr);
+        if (rc == SFTP_OK)
+            InvalidateSftpManifestCache(serverid);
         return (rc == SFTP_OK) ? true : false;
     });
 }
@@ -917,6 +932,8 @@ BOOL WINAPI FsSetAttr(LPCSTR RemoteName, int NewAttr)
             return false;
         ResetLastPercent(serverid);
         int rc = SftpSetAttr(serverid, remotedir.data(), NewAttr);
+        if (rc == SFTP_OK)
+            InvalidateSftpManifestCache(serverid);
         return (rc == SFTP_OK) ? true : false;
     });
 }
@@ -937,6 +954,8 @@ BOOL WINAPI FsSetTimeW(LPCWSTR RemoteName, LPFILETIME CreationTime, LPFILETIME L
             return false;
         ResetLastPercent(serverid);
         int rc = SftpSetDateTimeW(serverid, remotedir.data(), LastWriteTime);
+        if (rc == SFTP_OK)
+            InvalidateSftpManifestCache(serverid);
         return (rc == SFTP_OK) ? true : false;
     });
 }

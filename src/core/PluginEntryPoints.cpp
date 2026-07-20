@@ -22,6 +22,7 @@
 #include "LanPairSession.h"
 #include "LngLoader.h"
 #include "PhpAgentClient.h"
+#include "SftpArchivePipe.h"
 
 // Declared in SftpConnection.cpp
 void StartGlobalLanServices(bool startServer = true);
@@ -252,6 +253,7 @@ BOOL APIENTRY DllMain( HANDLE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
     if (ul_reason_for_call == DLL_PROCESS_DETACH) {
         // Stop LAN services before CRT destroys global objects
         StopGlobalLanServices();
+        StopSftpArchivePipeService();
         ShutdownMultiServer();
         if (g_winsockInitialized) {
             WSACleanup();
@@ -570,6 +572,7 @@ static int _FsInit(int PluginNr)
     DetectAndApplyLanguage(nullptr);
 
     InitMultiServer();
+    StartSftpArchivePipeService();
     StartGlobalLanServices();  // Start LAN Pair file server + discovery in background
     return 0;
 }
@@ -622,8 +625,9 @@ BOOL WINAPI FsDisconnect(LPCSTR DisconnectRoot)
             std::string connBuf = "DISCONNECT \\";
             connBuf += displayName;
             LogProc(PluginNumber, MSGTYPE_DISCONNECT, connBuf.c_str());
-            SftpCloseConnection(serverid);
-            SetServerIdForName(displayName.data(), nullptr); // this also frees the entry.
+            // Registry removal waits for archive-session leases before it closes
+            // and deletes the connection. Closing here would race the IPC worker.
+            SetServerIdForName(displayName.data(), nullptr);
         }
         return true;
     });

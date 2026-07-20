@@ -190,6 +190,7 @@
     <ClCompile Include="..\src\core\LanPair.cpp" />
     <ClCompile Include="..\src\core\LanPairSession.cpp" />
     <ClCompile Include="..\src\core\TrustedInstallerToken.cpp" />
+    <ClCompile Include="..\src\core\SftpArchivePipe.cpp" />
   </ItemGroup>
   <!-- Header Files -->
   <ItemGroup>
@@ -236,6 +237,7 @@
     <ClInclude Include="..\src\include\LanPair.h" />
     <ClInclude Include="..\src\include\LanPairSession.h" />
     <ClInclude Include="..\src\include\TrustedInstallerToken.h" />
+    <ClInclude Include="..\src\include\SftpArchivePipe.h" />
     <ClInclude Include="..\src\include\libssh2\libssh2.h" />
     <ClInclude Include="..\src\include\libssh2\libssh2_sftp.h" />
     <ClInclude Include="..\src\include\libssh2\libssh2_publickey.h" />
@@ -244,6 +246,12 @@
   <!-- Module Definition -->
   <ItemGroup>
     <None Include="sftpplug.def" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="SftpArchiveRouter.vcxproj">
+      <Project>{A2A14D9E-8CAC-4E30-8D47-668CEE0811AF}</Project>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+    </ProjectReference>
   </ItemGroup>
   <!-- Resource Files -->
   <ItemGroup>
@@ -258,7 +266,21 @@
     <Image Include="..\src\res\iconconnection.ico" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="RefreshDeployPackage" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <PropertyGroup>
+      <DeployPackageDir>$(MSBuildThisFileDirectory)..\SFTP\</DeployPackageDir>
+    </PropertyGroup>
+    <ItemGroup>
+      <DeployLanguages Include="$(MSBuildThisFileDirectory)..\src\res\language\zh-cn.lng" />
+    </ItemGroup>
+    <MakeDir Directories="$(DeployPackageDir);$(DeployPackageDir)language" />
+    <Delete Files="$(DeployPackageDir)Initialize-SftpArchiveRouter.ps1" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(DeployPackageDir)SFTPplug.wfx64" />
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)bin\x64_Release\SftpArchiveRouter.exe" DestinationFiles="$(DeployPackageDir)SftpArchiveRouter.exe" />
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)..\src\help\sftpplug.chm" DestinationFiles="$(DeployPackageDir)SFTPplug.chm" />
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)..\src\php\sftp.php" DestinationFiles="$(DeployPackageDir)sftp.php" />
+    <Copy SourceFiles="@(DeployLanguages)" DestinationFolder="$(DeployPackageDir)language\" />
+  </Target>
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
 </Project>
-

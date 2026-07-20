@@ -11,15 +11,20 @@
 #include <mutex>
 #include <memory>
 #include <algorithm>
+#include <condition_variable>
+#include <utility>
 
 struct SERVERENTRY {
     std::string name;
     SERVERID serverid = nullptr;
     DWORD threadid = 0;
     bool is_background = false;
+    size_t leases = 0;
+    bool closing = false;
 };
 
 static std::mutex g_registryMutex;
+static std::condition_variable g_registryChanged;
 static std::vector<std::unique_ptr<SERVERENTRY>> g_servers;
 extern DWORD mainthreadid;
 
@@ -68,6 +73,54 @@ SERVERID GetServerIdFromAnyThread(LPCSTR name) noexcept
     return nullptr;
 }
 
+void ServerSessionLease::reset() noexcept
+{
+    if (!entry_)
+        return;
+    std::lock_guard<std::mutex> lock(g_registryMutex);
+    auto* entry = static_cast<SERVERENTRY*>(entry_);
+    if (entry->leases > 0)
+        --entry->leases;
+    g_registryChanged.notify_all();
+    entry_ = nullptr;
+    serverid_ = nullptr;
+}
+
+ServerSessionLease::~ServerSessionLease()
+{
+    reset();
+}
+
+ServerSessionLease::ServerSessionLease(ServerSessionLease&& other) noexcept
+    : entry_(std::exchange(other.entry_, nullptr)),
+      serverid_(std::exchange(other.serverid_, nullptr))
+{
+}
+
+ServerSessionLease& ServerSessionLease::operator=(ServerSessionLease&& other) noexcept
+{
+    if (this != &other) {
+        reset();
+        entry_ = std::exchange(other.entry_, nullptr);
+        serverid_ = std::exchange(other.serverid_, nullptr);
+    }
+    return *this;
+}
+
+ServerSessionLease AcquireServerSessionLease(LPCSTR name) noexcept
+{
+    if (!name || !name[0])
+        return {};
+    std::lock_guard<std::mutex> lock(g_registryMutex);
+    for (const auto& entry : g_servers) {
+        if (!entry->closing && entry->serverid && _stricmp(entry->name.c_str(), name) == 0) {
+            ++entry->leases;
+            return ServerSessionLease(entry.get(), entry->serverid);
+        }
+    }
+    return {};
+}
+
 bool SetServerIdForName(LPCSTR name, SERVERID id) noexcept
 {
     if (!name || !name[0])
@@ -76,7 +129,7 @@ bool SetServerIdForName(LPCSTR name, SERVERID id) noexcept
     pConnectSettings old_cs = nullptr;
     bool success = false;
     {
-        std::lock_guard<std::mutex> lock(g_registryMutex);
+        std::unique_lock<std::mutex> lock(g_registryMutex);
         DWORD tid = GetCurrentThreadId();
         bool is_bg = (tid != mainthreadid);
         
@@ -85,11 +138,14 @@ bool SetServerIdForName(LPCSTR name, SERVERID id) noexcept
         if (entry) {
             if (entry->serverid != id) {
                 old_cs = static_cast<pConnectSettings>(entry->serverid);
+                entry->serverid = nullptr;
+                entry->closing = true;
+                g_registryChanged.wait(lock, [&entry] { return entry->leases == 0; });
             }
             if (id) {
                 entry->serverid = id;
+                entry->closing = false;
             } else {
-                entry->serverid = nullptr;
                 auto it = std::remove_if(g_servers.begin(), g_servers.end(), [&](const std::unique_ptr<SERVERENTRY>& e) {
                     return e.get() == entry;
                 });
@@ -267,13 +323,19 @@ void FreeServerList() noexcept
 {
     std::vector<pConnectSettings> to_close;
     {
-        std::lock_guard<std::mutex> lock(g_registryMutex);
+        std::unique_lock<std::mutex> lock(g_registryMutex);
         for (auto& entry : g_servers) {
             if (entry->serverid) {
                 to_close.push_back(static_cast<pConnectSettings>(entry->serverid));
                 entry->serverid = nullptr;
             }
+            entry->closing = true;
         }
+        g_registryChanged.wait(lock, [] {
+            return std::all_of(g_servers.begin(), g_servers.end(), [](const std::unique_ptr<SERVERENTRY>& entry) {
+                return entry->leases == 0;
+            });
+        });
         g_servers.clear();
     }
     for (auto cs : to_close) {

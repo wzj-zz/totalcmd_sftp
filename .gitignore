@@ -31,6 +31,8 @@ TODO.md
 # MSBuild outputs
 /build/.intermediates/
 /build/bin/
+/build/obj/
+/SFTP/
 
 # Release/package outputs
 /bin/*.zip

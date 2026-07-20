@@ -1,40 +1,35 @@
 # Agent Notes
 
-## Build
+## Build And Deployment
 
-- Build the x64 release plugin with:
+- Build x64 Release with:
   `& 'C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe' build\SFTPplug.sln /m /p:Configuration=Release /p:Platform=x64`
-- The output plugin is `build\bin\x64_Release\sftpplug.wfx`.
-- Do not assume an edited DLL is loaded by Total Commander. Total Commander must be fully restarted after replacing the configured WFX file.
+- Output WFX: `build\bin\x64_Release\sftpplug.wfx`.
+- A successful build refreshes ignored `SFTP\` with only `SFTPplug.wfx64`, `SftpArchiveRouter.exe`, `SFTPplug.chm`, `sftp.php`, and `language\zh-cn.lng`. Never add these generated artifacts to Git.
+- Deploy while Total Commander is stopped: delete the portable `<Total Commander>\Plugins\Wfx\SFTP\` directory, then copy the generated `SFTP\` directory in its place. Do not perform hash verification unless requested. Restart Total Commander afterward.
 
-## Total Commander WFX Callbacks
+## TAR Router
+
+- `SftpArchiveRouter.exe` must remain beside `SFTPplug.wfx64`; it owns local `tar.exe`/`7z.exe`, while the WFX named-pipe service owns the active SSH session.
+- `SftpArchiveRouter.exe init` registers the portable parent Total Commander instance's `Alt+F5` pack, `Alt+F6` unpack, `Alt+F7` TAR copy, `Alt+F8` TAR move, `Alt+F9` remote batch delete, `Alt+F11` directory-tree prewarm, and `Alt+F12` local-mirror directory comparison. It writes `%COMMANDER_PATH%` router paths so the instance remains relocatable. It must run while Total Commander is stopped and must not bind or override native `F5` or `F6`.
+- The router must prompt for a target before each SFTP TAR operation: archive file path for pack, target directory for unpack/copy/move. Enter keeps the default; Cancel must not start the operation.
+- TAR streaming requires active SSH/SFTP and remote `tar`; PHP Agent and LAN Pair are unsupported.
+- `Alt+F8` must delete sources only after target success.
+- `Alt+F11` prewarms one active SSH/SFTP session's current directory tree into a ten-minute in-memory `WIN32_FIND_DATAW` cache. The cache must be invalidated after a remote mutation or session close and must preserve Total Commander's native sync/patch workflow.
+- `Alt+F12` must use isolated `%TEMP%\SftpLocalDiff` mirrors and launch Total Commander's local sync dialog. Only explicitly confirmed changes from an SFTP mirror may be applied remotely; unchanged and successfully applied sessions must be deleted, while failed or declined sessions remain for inspection.
+
+## WFX And Transfers
 
 - Every exported `Fs*` entry point must retain `DllExceptionBarrier` and `dll_invoke` protection.
-- Remote-to-local downloads use `FsGetFileW`; local-to-remote uploads use `FsPutFileW`.
-- Copying between two WFX panels uses `FsRenMovFileW` with `FS_STATUS_OP_RENMOV_SINGLE` or `FS_STATUS_OP_RENMOV_MULTI`, not `FsGetFileW`.
-- Cross-session regular-file copy is implemented in `PluginEntryPointsFile.cpp`. It streams source SFTP data to the target SFTP handle in memory. F6 deletes the source only after a successful copy.
-- Cross-session directory copy is intentionally unsupported. Do not silently treat a WFX virtual path as a Windows path.
-- A WFX virtual path has the form `\\<session name>\\<remote path>`. Local paths such as `C:\\...`, `Z:\\...`, and UNC paths must never be interpreted as connection names.
+- Use `FsGetFileW` for remote-to-local, `FsPutFileW` for local-to-remote, and `FsRenMovFileW` for WFX-panel copies.
+- Cross-session regular-file copy streams SFTP handles in `PluginEntryPointsFile.cpp`; source deletion for F6 occurs only after success. Cross-session directory copy is unsupported.
+- WFX virtual paths use `\\<session name>\\<remote path>`. Never treat local drive or UNC paths as connection names.
+- Sessions are thread-scoped. Long-running cross-thread archive work must use `ServerSessionLease` so disconnect waits for it.
+- libssh2 is non-blocking: retry `LIBSSH2_ERROR_EAGAIN` after `WaitForSshIo` for opens, reads, and writes.
+- Convert remote relative paths with `ToRemotePathA` and preserve Unix paths and hidden names.
 
-## Connection Lookup
+## Logging And Scope
 
-- Sessions are normally thread-scoped in `ServerRegistry` because TC uses worker threads for transfers.
-- `GetServerIdFromAnyThread` is required for cross-panel operations: it resolves an active session by display name regardless of worker thread.
-- If an active session cannot be found, cross-session transfers may establish a temporary connection from the saved profile. Temporary connections must be closed with `SftpCloseConnection`, `StopSshKeepAlive`, then `delete`.
-
-## SFTP Transfers
-
-- libssh2 operates non-blocking. File open, read, and write paths must handle `LIBSSH2_ERROR_EAGAIN` by waiting with `WaitForSshIo` and retrying. A single failed `open` is not a sufficient failure condition.
-- Convert remote relative paths using `ToRemotePathA` and preserve Unix paths and hidden filenames such as `/.zsh_history`.
-
-## Logging
-
-- Total Commander operation logs use `LogProc` / `LogProcW` and appear in TC's `wcftplog.txt`. Use them for user-facing operation flow.
-- Development diagnostics use `SFTP_LOG(tag, fmt, ...)` from `global.h`. Tags are subsystem names such as `CONN`, `AUTH`, `FIND`, `PHP`, `LAN`, and `REMOTE_COPY`.
-- Keep `LOG_ENABLED` and `LOG_TO_FILE` set to `0` for normal release builds. When explicitly diagnosing an issue, enable them temporarily to write `C:\temp\sftpplug.log`, then disable them again before delivering the release build.
-- Do not duplicate routine operation logs in both systems. Reserve `SFTP_LOG` for internal state, protocol details, retries, and error codes.
-
-## Scope
-
-- Do not modify third-party code under `thirdparty/` unless the task explicitly requires it.
-- Preserve existing user/worktree changes. Do not use destructive git operations.
+- Use `LogProc` / `LogProcW` for Total Commander operation flow. Use `SFTP_LOG` only for internal state and errors.
+- Keep `LOG_ENABLED` and `LOG_TO_FILE` set to `0` for releases.
+- Do not modify `thirdparty/` unless explicitly requested. Preserve existing worktree changes and never use destructive Git operations.

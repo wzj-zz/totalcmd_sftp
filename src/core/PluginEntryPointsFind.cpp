@@ -18,6 +18,7 @@
 #include "LanPairSession.h"
 #include "PluginEntryPointsInternal.h"
 #include "PhpAgentClient.h"
+#include "SftpArchivePipe.h"
 
 // RAII guard for a freshly-established server connection.
 // Prevents connection leaks on error paths without manual cleanup pairing.
@@ -61,12 +62,18 @@ struct LanPairFindState {
     size_t index = 0;
 };
 
+struct ManifestFindState {
+    std::vector<WIN32_FIND_DATAW> entries;
+    size_t index = 0;
+};
+
 typedef struct {
     LPVOID           sftpdataptr;    /* LIBSSH2_SFTP_HANDLE, SCP_DATA, or LanPairFindState* */
     pConnectSettings serverid;
     SERVERHANDLE     rootfindhandle;
     bool             rootfindfirst;
     bool             isLanPair;  /* if true, sftpdataptr is LanPairFindState* */
+    bool             isManifest; /* if true, sftpdataptr is ManifestFindState* */
 } tLastFindStuct, *pLastFindStuct;
 
 static HANDLE CreateLastFindHandle(LPVOID sftpdataptr, pConnectSettings serverid, bool rootfindfirst) noexcept
@@ -77,7 +84,27 @@ static HANDLE CreateLastFindHandle(LPVOID sftpdataptr, pConnectSettings serverid
     lfMem->rootfindhandle = nullptr;
     lfMem->rootfindfirst = rootfindfirst;
     lfMem->isLanPair = false;
+    lfMem->isManifest = false;
     return static_cast<HANDLE>(lfMem.release());
+}
+
+static HANDLE CreateManifestFindHandle(std::vector<WIN32_FIND_DATAW> entries,
+                                       WIN32_FIND_DATAW* findData, pConnectSettings serverid) noexcept
+{
+    if (entries.empty())
+        return INVALID_HANDLE_VALUE;
+    auto state = std::make_unique<ManifestFindState>();
+    state->entries = std::move(entries);
+    *findData = state->entries.front();
+    state->index = 1;
+    auto lf = std::make_unique<tLastFindStuct>();
+    lf->sftpdataptr = state.release();
+    lf->serverid = serverid;
+    lf->rootfindhandle = nullptr;
+    lf->rootfindfirst = false;
+    lf->isLanPair = false;
+    lf->isManifest = true;
+    return static_cast<HANDLE>(lf.release());
 }
 
 // ---------------------------------------------------------------------------
@@ -126,7 +153,8 @@ static HANDLE LanCreateFindHandle(std::vector<LanPairSession::DirEntry> entries,
     lf->serverid      = serverid;
     lf->rootfindhandle = nullptr;
     lf->rootfindfirst  = false;
-    lf->isLanPair      = true;
+        lf->isLanPair      = true;
+        lf->isManifest     = false;
 
     if (state->entries.empty()) {
         lf->sftpdataptr = state.release();
@@ -254,6 +282,16 @@ HANDLE WINAPI FsFindFirstW(LPCWSTR Path, LPWIN32_FIND_DATAW FindData)
         }
 
         // Retrieve the directory
+        std::vector<WIN32_FIND_DATAW> manifestEntries;
+        if (TryGetSftpManifestDirectoryListing(serverid, remotedir.data(), manifestEntries)) {
+            SFTP_LOG("MANIFEST", "Serving cached directory '%S' (%zu entries)", remotedir.data(), manifestEntries.size());
+            newConnGuard.commit();
+            HANDLE manifestHandle = CreateManifestFindHandle(std::move(manifestEntries), FindData, serverid);
+            if (manifestHandle != INVALID_HANDLE_VALUE)
+                return manifestHandle;
+            SetLastError(ERROR_NO_MORE_FILES);
+            return INVALID_HANDLE_VALUE;
+        }
         SFTP_LOG("FIND", "FsFindFirstW: connection ready, calling SftpFindFirstFileW remotedir='%S'", remotedir.data());
         bool ok = (SFTP_OK == SftpFindFirstFileW(serverid, remotedir.data(), &sftpdataptr));
         SFTP_LOG("FIND", "FsFindFirstW: SftpFindFirstFileW returned ok=%d", ok ? 1 : 0);
@@ -345,6 +383,13 @@ BOOL WINAPI FsFindNextW(HANDLE Hdl, LPWIN32_FIND_DATAW FindData)
             LanFillFindData(FindData, state->entries[state->index++]);
             return true;
         }
+        if (lf->isManifest) {
+            auto* state = static_cast<ManifestFindState*>(lf->sftpdataptr);
+            if (!state || state->index >= state->entries.size())
+                return false;
+            *FindData = state->entries[state->index++];
+            return true;
+        }
         if (lf->sftpdataptr) {
             int rc = SftpFindNextFileW(lf->serverid, lf->sftpdataptr, FindData);
             return (rc == SFTP_OK) ? true : false;
@@ -375,6 +420,9 @@ int WINAPI FsFindClose(HANDLE Hdl)
         pLastFindStuct lf = (pLastFindStuct)Hdl;
         if (lf->isLanPair) {
             delete static_cast<LanPairFindState*>(lf->sftpdataptr);
+            lf->sftpdataptr = nullptr;
+        } else if (lf->isManifest) {
+            delete static_cast<ManifestFindState*>(lf->sftpdataptr);
             lf->sftpdataptr = nullptr;
         } else if (lf->sftpdataptr) {
             SftpFindClose(lf->serverid, lf->sftpdataptr);
@@ -420,6 +468,8 @@ BOOL WINAPI FsMkDirW(LPCWSTR Path)
                 return true;
             }
             int rc = SftpCreateDirectoryW(serverid, remotedir.data());
+            if (rc == SFTP_OK)
+                InvalidateSftpManifestCache(serverid);
             return (rc == SFTP_OK) ? true : false;
         }
         // new connection

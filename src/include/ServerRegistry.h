@@ -3,6 +3,28 @@
 typedef LPVOID  SERVERID;
 typedef LPVOID  SERVERHANDLE;
 
+class ServerSessionLease {
+public:
+    ServerSessionLease() noexcept = default;
+    ~ServerSessionLease();
+    ServerSessionLease(const ServerSessionLease&) = delete;
+    ServerSessionLease& operator=(const ServerSessionLease&) = delete;
+    ServerSessionLease(ServerSessionLease&& other) noexcept;
+    ServerSessionLease& operator=(ServerSessionLease&& other) noexcept;
+
+    SERVERID get() const noexcept { return serverid_; }
+    explicit operator bool() const noexcept { return serverid_ != nullptr; }
+
+private:
+    friend ServerSessionLease AcquireServerSessionLease(LPCSTR name) noexcept;
+    explicit ServerSessionLease(LPVOID entry, SERVERID serverid) noexcept
+        : entry_(entry), serverid_(serverid) {}
+    void reset() noexcept;
+
+    LPVOID entry_ = nullptr;
+    SERVERID serverid_ = nullptr;
+};
+
 // Lifecycle
 void InitMultiServer() noexcept;
 void ShutdownMultiServer() noexcept;   // DeleteCriticalSection + FreeServerList
@@ -24,6 +46,9 @@ SERVERID GetServerIdFromName(LPCSTR servername, DWORD threadid) noexcept;
 // Finds an active connection by its display name regardless of the TC worker
 // thread that owns it. Used when TC copies between two plugin panels.
 SERVERID GetServerIdFromAnyThread(LPCSTR servername) noexcept;
+// Keeps an active session alive until the returned lease is released. Use this
+// for long-running cross-thread work instead of retaining a raw SERVERID.
+ServerSessionLease AcquireServerSessionLease(LPCSTR servername) noexcept;
 bool SetServerIdForName(LPCSTR displayname, SERVERID newid) noexcept;
 
 // Path helpers

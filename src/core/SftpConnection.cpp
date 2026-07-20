@@ -42,6 +42,7 @@
 #include "ConnectionNetwork.h"
 #include "SshSessionInit.h"
 #include "PluginEntryPointsInternal.h"
+#include "SftpArchivePipe.h"
 #include "ConnectionAuth.h"
 #include "SshLibraryLoader.h"
 #include "LanPairSession.h"
@@ -915,9 +916,10 @@ bool SftpConfigureServer(LPCSTR DisplayName, LPCSTR inifilename)
 
 int SftpCloseConnection(pConnectSettings ConnectSettings)
 {
-    ScopedSshSessionUse _sessionUse(ConnectSettings);
     if (!ConnectSettings)
         return SFTP_FAILED;
+    InvalidateSftpManifestCache(ConnectSettings);
+    ScopedSshSessionUse _sessionUse(ConnectSettings);
 
     // 1. LAN Pair (own transport, not SSH) — quick disconnect.
     if (ConnectSettings->lanSession) {
