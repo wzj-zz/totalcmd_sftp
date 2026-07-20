@@ -15,6 +15,7 @@
 #include "SftpArchivePipe.h"
 #include "SftpClient.h"
 #include "SftpInternal.h"
+#include "PluginEntryPoints.h"
 #include "ServerRegistry.h"
 #include "TransferUtils.h"
 #include "UnicodeHelpers.h"
@@ -31,6 +32,8 @@ constexpr DWORD kArchivePackExtractRemote = 6;
 constexpr DWORD kArchiveIsDirectory = 7;
 constexpr DWORD kArchiveDeleteRemote = 8;
 constexpr DWORD kArchivePrewarmManifest = 9;
+constexpr DWORD kArchiveLogStatus = 10;
+constexpr DWORD kArchiveShowError = 11;
 constexpr DWORD kMaxPathBytes = 64 * 1024;
 constexpr DWORD kMaxItemBytes = 1024 * 1024;
 constexpr DWORD kChunkSize = 64 * 1024;
@@ -411,6 +414,9 @@ std::string BuildRemoteDeleteCommand(const RemoteEndpoint& source, const std::st
 
 bool StreamProducerToPipe(HANDLE pipe, RemoteEndpoint& source, const std::string& command, std::string& error)
 {
+    // libssh2 keeps EAGAIN/block-direction state on the session, so a complete
+    // archive stream must not interleave with panel enumeration on that session.
+    ScopedSshSessionUse archiveUse(source.cs);
     auto channel = StartCommand(source.cs, command, error);
     if (!channel)
         return false;
@@ -443,6 +449,9 @@ bool StreamProducerToPipe(HANDLE pipe, RemoteEndpoint& source, const std::string
 
 bool StreamPipeToConsumer(HANDLE pipe, RemoteEndpoint& target, const std::string& command, std::string& error)
 {
+    // The scoped calls below are recursive and remain valid while this guard
+    // prevents another WFX operation from changing libssh2 session state.
+    ScopedSshSessionUse archiveUse(target.cs);
     auto channel = StartCommand(target.cs, command, error);
     if (!channel)
         return false;
@@ -472,6 +481,8 @@ bool StreamPipeToConsumer(HANDLE pipe, RemoteEndpoint& target, const std::string
 bool StreamRemoteToRemote(RemoteEndpoint& source, const std::string& sourceCommand,
                           RemoteEndpoint& target, const std::string& targetCommand, std::string& error)
 {
+    ScopedSshSessionUse targetUse(target.cs);
+    ScopedSshSessionUse sourceUse(source.cs);
     auto targetChannel = StartCommand(target.cs, targetCommand, error);
     if (!targetChannel)
         return false;
@@ -582,6 +593,26 @@ void ServeClient(HANDLE pipe)
         }
     } else if (request.operation == kArchivePrewarmManifest) {
         ok = PrewarmManifest(sourcePath, error);
+    } else if (request.operation == kArchiveLogStatus) {
+        std::string sessionName;
+        std::wstring relativePath;
+        if (ParseSftpPath(sourcePath, sessionName, relativePath) && LogProc) {
+            // The virtual path is the source of truth; DisplayName can belong
+            // to another active connection after concurrent panel activity.
+            const std::string status = "[" + sessionName + "] " + items;
+            LogProc(PluginNumber, MSGTYPE_DETAILS, status.c_str());
+            ok = true;
+        } else if (error.empty()) {
+            error = "Invalid SFTP path or unavailable log callback.";
+        }
+    } else if (request.operation == kArchiveShowError) {
+        if (RequestProcW) {
+            const std::wstring message = unicode_util::utf8_to_wstring(items);
+            RequestProcW(PluginNumber, RT_MsgOK, L"SFTP Archive Router", message.c_str(), nullptr, 0);
+            ok = true;
+        } else {
+            error = "Total Commander cannot display plugin error messages.";
+        }
     } else {
         error = "Unsupported archive operation.";
     }

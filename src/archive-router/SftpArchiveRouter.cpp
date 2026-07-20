@@ -28,7 +28,10 @@ constexpr DWORD kArchivePackExtractRemote = 6;
 constexpr DWORD kArchiveIsDirectory = 7;
 constexpr DWORD kArchiveDeleteRemote = 8;
 constexpr DWORD kArchivePrewarmManifest = 9;
+constexpr DWORD kArchiveLogStatus = 10;
+constexpr DWORD kArchiveShowError = 11;
 constexpr DWORD kChunkSize = 64 * 1024;
+constexpr int kOperationCanceled = 3;
 
 struct ArchiveRequest {
     DWORD magic;
@@ -37,6 +40,12 @@ struct ArchiveRequest {
     DWORD targetPathBytes;
     DWORD itemBytes;
 };
+
+std::string ToUtf8(std::wstring_view text);
+HANDLE OpenArchivePipe();
+bool StartArchiveRequest(HANDLE pipe, DWORD operation, std::wstring_view sourcePath,
+                         std::wstring_view targetPath, std::string_view items,
+                         std::string& error);
 
 HWND FindTotalCommanderWindow()
 {
@@ -47,14 +56,25 @@ HWND FindTotalCommanderWindow()
 int ShowRouterMessage(std::wstring_view message, std::wstring_view title, UINT flags)
 {
     HWND owner = FindTotalCommanderWindow();
-    if (owner)
-        SetForegroundWindow(owner);
-    return MessageBoxW(owner, std::wstring(message).c_str(), std::wstring(title).c_str(), flags | MB_SETFOREGROUND);
+    return MessageBoxW(owner, std::wstring(message).c_str(), std::wstring(title).c_str(),
+                       flags | MB_SETFOREGROUND);
+}
+
+bool ShowErrorInTotalCommander(std::wstring_view message)
+{
+    HANDLE pipe = OpenArchivePipe();
+    if (pipe == INVALID_HANDLE_VALUE)
+        return false;
+    std::string error;
+    const bool shown = StartArchiveRequest(pipe, kArchiveShowError, L"", L"", ToUtf8(message), error);
+    CloseHandle(pipe);
+    return shown;
 }
 
 void ShowError(std::wstring_view message)
 {
-    ShowRouterMessage(message, L"SFTP Archive Router", MB_OK | MB_ICONERROR);
+    if (!ShowErrorInTotalCommander(message))
+        ShowRouterMessage(message, L"SFTP Archive Router", MB_OK | MB_ICONERROR);
 }
 
 void ShowInfo(std::wstring_view message)
@@ -177,8 +197,6 @@ bool PromptForTarget(const wchar_t* label, std::wstring& target)
 
     TargetPromptState state{ label, &target };
     HWND owner = FindTotalCommanderWindow();
-    if (owner)
-        SetForegroundWindow(owner);
     const INT_PTR result = DialogBoxIndirectParamW(GetModuleHandleW(nullptr), header, owner,
                                                     TargetPromptProc, reinterpret_cast<LPARAM>(&state));
     if (result == -1) {
@@ -335,6 +353,20 @@ bool IsSftpVirtualPath(std::wstring_view path)
         ? path.substr(firstSegment)
         : path.substr(firstSegment, separator - firstSegment);
     return _wcsicmp(std::wstring(root).c_str(), L"SFTP") == 0;
+}
+
+std::wstring DescribeOperationPath(std::wstring_view path)
+{
+    if (!IsSftpVirtualPath(path))
+        return path.empty() ? std::wstring{} : L"local";
+    const size_t root = path.find_first_not_of(L"\\/");
+    const size_t rootEnd = path.find_first_of(L"\\/", root);
+    const size_t session = rootEnd == std::wstring_view::npos ? std::wstring_view::npos
+        : path.find_first_not_of(L"\\/", rootEnd);
+    if (session == std::wstring_view::npos)
+        return L"SFTP";
+    const size_t sessionEnd = path.find_first_of(L"\\/", session);
+    return std::wstring(path.substr(session, sessionEnd == std::wstring_view::npos ? std::wstring_view::npos : sessionEnd - session));
 }
 
 bool RunNativeTcCommand(const wchar_t* command)
@@ -580,6 +612,38 @@ bool StartArchiveRequest(HANDLE pipe, DWORD operation, std::wstring_view sourceP
            WriteExact(pipe, targetUtf8.data(), request.targetPathBytes) &&
            WriteExact(pipe, items.data(), request.itemBytes) &&
            ReadResult(pipe, error);
+}
+
+void LogSftpOperationResult(std::wstring_view sourcePath, std::wstring_view targetPath,
+                            std::wstring_view action, std::wstring_view shortcut, int result)
+{
+    const std::wstring_view logPath = IsSftpVirtualPath(targetPath) ? targetPath
+        : IsSftpVirtualPath(sourcePath) ? sourcePath : std::wstring_view{};
+    if (logPath.empty())
+        return;
+
+    const wchar_t* outcome = result == 0 ? L"complete" : result == kOperationCanceled ? L"canceled" : L"failed";
+    HANDLE pipe = OpenArchivePipe();
+    if (pipe == INVALID_HANDLE_VALUE)
+        return;
+    std::string error;
+    const std::wstring source = DescribeOperationPath(sourcePath);
+    const std::wstring target = DescribeOperationPath(targetPath);
+    const std::wstring location = action == L"Delete" ? source
+        : target.empty() ? source
+        : source.empty() ? target
+        : source + (action == L"Diff/sync" ? L" <-> " : L" -> ") + target;
+    const std::wstring status = std::wstring(action) + L" " + location + L" " + outcome +
+        L" (" + std::wstring(shortcut) + L")";
+    StartArchiveRequest(pipe, kArchiveLogStatus, logPath, L"", ToUtf8(status), error);
+    CloseHandle(pipe);
+}
+
+int FinishSftpOperation(std::wstring_view sourcePath, std::wstring_view targetPath,
+                        std::wstring_view action, std::wstring_view shortcut, int result)
+{
+    LogSftpOperationResult(sourcePath, targetPath, action, shortcut, result);
+    return result == kOperationCanceled ? 0 : result;
 }
 
 bool WriteArchiveEnd(HANDLE pipe)
@@ -940,16 +1004,14 @@ int StreamLocalArchiveToSftp(const std::wstring& sourcePath, const std::wstring&
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
     drainStderr.join();
-    bool remoteOk = false;
-    if (streamed)
-        remoteOk = ReadResult(pipe, remoteError);
+    const bool remoteOk = ReadResult(pipe, remoteError);
     CloseHandle(pipe);
-    if (tarExit != 0) {
-        ShowError(tarError.empty() ? L"Windows tar.exe could not create the archive stream." : FromUtf8(tarError));
+    if (!remoteOk) {
+        ShowError(remoteError.empty() ? L"The remote archive stream ended unexpectedly." : FromUtf8(remoteError));
         return 1;
     }
-    if (!remoteOk) {
-        ShowError(remoteError.empty() ? L"The remote server could not extract the archive stream." : FromUtf8(remoteError));
+    if (tarExit != 0) {
+        ShowError(tarError.empty() ? L"Windows tar.exe could not create the archive stream." : FromUtf8(tarError));
         return 1;
     }
     return 0;
@@ -1200,7 +1262,7 @@ int LocalDiff(const std::wstring& sourcePath, const std::wstring& targetPath)
     if ((leftSftpChanges && !leftSftpChanges->empty()) || (rightSftpChanges && !rightSftpChanges->empty())) {
         if (!ConfirmLocalDiffApply(leftSftpChanges, rightSftpChanges)) {
             ShowInfo(L"Remote changes were not applied. The local diff session was retained for inspection:\n" + session.root());
-            return 0;
+            return kOperationCanceled;
         }
         if ((leftSftp && !ApplyLocalDiffChanges(leftPath, left, leftChanges, error)) ||
             (rightSftp && !ApplyLocalDiffChanges(rightPath, right, rightChanges, error))) {
@@ -1439,7 +1501,7 @@ int Pack(const std::wstring& sourcePath, const std::wstring& targetPath, const s
     }
     std::wstring archiveTarget = JoinPath(TargetForPrompt(targetPath), ArchiveName(items));
     if (!PromptForTarget(L"Archive file name:", archiveTarget))
-        return 0;
+        return kOperationCanceled;
     const std::string itemText = JoinArchiveItems(items);
     if (!sourceSftp)
         return StreamLocalArchiveToSftp(sourcePath, targetPath, listPath, kArchivePut, &archiveTarget);
@@ -1463,7 +1525,7 @@ int Copy(const std::wstring& sourcePath, const std::wstring& targetPath, const s
 
     std::wstring target = TargetForPrompt(targetPath);
     if (!PromptForTarget(L"Target directory:", target))
-        return 0;
+        return kOperationCanceled;
     const std::string itemText = JoinArchiveItems(items);
     if (!sourceSftp)
         return StreamLocalArchiveToSftp(sourcePath, target, listPath, kArchiveExtract);
@@ -1486,7 +1548,7 @@ int Move(const std::wstring& sourcePath, const std::wstring& targetPath, const s
     }
     std::wstring target = TargetForPrompt(targetPath);
     if (!PromptForTarget(L"Target directory:", target))
-        return 0;
+        return kOperationCanceled;
     const std::string itemText = JoinArchiveItems(items);
     int copied = 1;
     if (!sourceSftp)
@@ -1519,7 +1581,7 @@ int Delete(const std::wstring& sourcePath, const std::wstring& listPath)
         : L"Delete " + std::to_wstring(items.size()) + L" selected remote items permanently?";
     if (ShowRouterMessage(message, L"SFTP Archive Router",
                           MB_YESNO | MB_ICONWARNING) != IDYES)
-        return 0;
+        return kOperationCanceled;
     return DeleteSftpSource(sourcePath, JoinArchiveItems(items)) ? 0 : 1;
 }
 
@@ -1559,7 +1621,7 @@ int Unpack(const std::wstring& sourcePath, const std::wstring& targetPath, const
     if (IsSftpVirtualPath(sourcePath) || IsSftpVirtualPath(targetPath)) {
         std::wstring target = TargetForPrompt(targetPath);
         if (!PromptForTarget(L"Target directory:", target))
-            return 0;
+            return kOperationCanceled;
         if (IsSftpVirtualPath(sourcePath)) {
             if (IsSftpVirtualPath(target))
                 return ExtractSftpArchive(selectedArchive, L"", &target);
@@ -1594,7 +1656,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         const std::wstring sourcePath(argv[2]);
         LocalFree(argv);
         if (operation == L"prewarm")
-            return Prewarm(sourcePath);
+            return FinishSftpOperation(sourcePath, L"", L"Prewarm", L"Alt+F11", Prewarm(sourcePath));
         ShowError(L"Unknown archive router command.");
         return 2;
     }
@@ -1603,7 +1665,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         const std::wstring targetPath(argv[3]);
         LocalFree(argv);
         if (operation == L"localdiff")
-            return LocalDiff(sourcePath, targetPath);
+            return FinishSftpOperation(sourcePath, targetPath, L"Diff/sync", L"Alt+F12", LocalDiff(sourcePath, targetPath));
         ShowError(L"Unknown archive router command.");
         return 2;
     }
@@ -1613,15 +1675,15 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     LocalFree(argv);
 
     if (operation == L"pack")
-        return Pack(sourcePath, targetPath, listPath);
+        return FinishSftpOperation(sourcePath, targetPath, L"Compress", L"Alt+F5", Pack(sourcePath, targetPath, listPath));
     if (operation == L"copy")
-        return Copy(sourcePath, targetPath, listPath);
+        return FinishSftpOperation(sourcePath, targetPath, L"Copy", L"Alt+F7", Copy(sourcePath, targetPath, listPath));
     if (operation == L"move")
-        return Move(sourcePath, targetPath, listPath);
+        return FinishSftpOperation(sourcePath, targetPath, L"Move", L"Alt+F8", Move(sourcePath, targetPath, listPath));
     if (operation == L"delete")
-        return Delete(sourcePath, listPath);
+        return FinishSftpOperation(sourcePath, targetPath, L"Delete", L"Alt+F9", Delete(sourcePath, listPath));
     if (operation == L"unpack")
-        return Unpack(sourcePath, targetPath, listPath);
+        return FinishSftpOperation(sourcePath, targetPath, L"Decompress", L"Alt+F6", Unpack(sourcePath, targetPath, listPath));
     ShowError(L"Unknown archive operation.");
     return 2;
 }
