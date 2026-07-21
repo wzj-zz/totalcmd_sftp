@@ -39,6 +39,8 @@ constexpr DWORD kMaxItemBytes = 1024 * 1024;
 constexpr DWORD kChunkSize = 64 * 1024;
 constexpr size_t kMaxManifestBytes = 64 * 1024 * 1024;
 constexpr ULONGLONG kManifestLifetimeMs = 10 * 60 * 1000;
+constexpr DWORD kArchiveCompletionTimeoutMs = 5 * 60 * 1000;
+constexpr DWORD kArchiveIoStallTimeoutMs = 5 * 60 * 1000;
 
 struct ArchiveRequest {
     DWORD magic;
@@ -152,6 +154,12 @@ bool OpenEndpoint(const std::string& virtualPath, RemoteEndpoint& endpoint, std:
         error = "The selected transport does not support SSH archive streaming.";
         return false;
     }
+    // Panel operations can reconnect after a TCP loss while an archive request
+    // still holds the previous session object. Check it before opening tar.
+    if (!ReconnectSFTPChannelIfNeeded(endpoint.cs)) {
+        error = "The SFTP session could not be reconnected for archive streaming.";
+        return false;
+    }
     endpoint.remotePath = ToRemotePathA(endpoint.cs, relativePath.c_str());
     while (endpoint.remotePath.size() > 1 && endpoint.remotePath.ends_with("/."))
         endpoint.remotePath.resize(endpoint.remotePath.size() - 2);
@@ -160,7 +168,33 @@ bool OpenEndpoint(const std::string& virtualPath, RemoteEndpoint& endpoint, std:
     return !endpoint.remotePath.empty();
 }
 
-bool WriteRemoteAll(ISshChannel* channel, pConnectSettings cs, const char* data, size_t length)
+bool ReconnectArchiveSession(pConnectSettings cs)
+{
+    if (!cs || IsPhpAgentTransport(cs) || IsLanPairTransport(cs))
+        return false;
+    SftpCloseConnection(cs);
+    return SftpConnect(cs) == SFTP_OK && cs->session && (cs->scponly || cs->sftpsession);
+}
+
+bool WaitForArchiveIo(pConnectSettings cs)
+{
+    const auto start = std::chrono::steady_clock::now();
+    for (;;) {
+        if (EscapePressed())
+            return false;
+        if (WaitForSshIo(cs, SOCKET_READ_POLL_MS))
+            return true;
+        if (cs && !cs->transport_stream && IsSocketDisconnected(cs->sock))
+            return false;
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start).count();
+        if (elapsed >= kArchiveIoStallTimeoutMs)
+            return false;
+    }
+}
+
+bool WriteRemoteAll(ISshChannel* channel, pConnectSettings cs, const char* data, size_t length,
+                    std::string& error)
 {
     while (length > 0) {
         ssize_t rc = 0;
@@ -174,10 +208,15 @@ bool WriteRemoteAll(ISshChannel* channel, pConnectSettings cs, const char* data,
             continue;
         }
         if (rc == LIBSSH2_ERROR_EAGAIN) {
-            if (!WaitForSshIo(cs, DIRECTORY_IO_POLL_MS))
+            // No socket event in one short poll is normal under load. Keep
+            // retrying until the archive connection has genuinely stalled.
+            if (!WaitForArchiveIo(cs)) {
+                error = "The remote archive stream stalled before all data was sent.";
                 return false;
+            }
             continue;
         }
+        error = "Could not write archive data to the remote SSH channel (SSH error " + std::to_string(rc) + ").";
         return false;
     }
     return true;
@@ -185,19 +224,32 @@ bool WriteRemoteAll(ISshChannel* channel, pConnectSettings cs, const char* data,
 
 std::unique_ptr<ISshChannel> StartCommand(pConnectSettings cs, const std::string& command, std::string& error)
 {
-    std::unique_ptr<ISshChannel> channel;
-    {
-        ScopedSshSessionUse sessionUse(cs);
-        channel = ConnectChannel(cs->session.get(), cs->sock);
-    }
-    if (!channel || WaitForOperation([&] {
+    const auto start = [&]() -> std::unique_ptr<ISshChannel> {
+        std::unique_ptr<ISshChannel> channel;
+        {
             ScopedSshSessionUse sessionUse(cs);
-            return channel->exec(command.c_str());
-        }, SSH_AUTH_STAGE_TIMEOUT_MS, cs) < 0) {
-        error = "Could not start the remote archive command.";
-        return {};
+            channel = ConnectChannel(cs->session.get(), cs->sock);
+        }
+        if (!channel || WaitForOperation([&] {
+                ScopedSshSessionUse sessionUse(cs);
+                return channel->exec(command.c_str());
+            }, SSH_AUTH_STAGE_TIMEOUT_MS, cs) < 0)
+            return {};
+        return channel;
+    };
+
+    if (auto channel = start())
+        return channel;
+
+    // A dropped TCP connection can leave libssh2 allocated until its first
+    // channel operation fails. Retry only before acknowledging the router,
+    // so no archive bytes can be sent twice.
+    if (ReconnectArchiveSession(cs)) {
+        if (auto channel = start())
+            return channel;
     }
-    return channel;
+    error = "Could not start the remote archive command after reconnecting the SFTP session.";
+    return {};
 }
 
 bool CloseCommand(std::unique_ptr<ISshChannel>& channel, pConnectSettings cs, bool sendEof,
@@ -205,21 +257,32 @@ bool CloseCommand(std::unique_ptr<ISshChannel>& channel, pConnectSettings cs, bo
 {
     if (!channel)
         return false;
-    if (sendEof && WaitForOperation([&] {
+
+    int flushResult = 0;
+    int sendEofResult = 0;
+    int waitEofResult = 0;
+    if (sendEof) {
+        // libssh2 can return EAGAIN from sendEof while prior channel writes
+        // remain buffered. Flush them first, then close the remote stdin.
+        flushResult = WaitForOperation([&] {
             ScopedSshSessionUse sessionUse(cs);
-            return channel->sendEof();
-        }, SSH_AUTH_STAGE_TIMEOUT_MS, cs) < 0) {
-        error = "Could not finish the remote archive command.";
-        return false;
+            return channel->flush();
+        }, kArchiveCompletionTimeoutMs, cs);
+        if (flushResult >= 0) {
+            sendEofResult = WaitForOperation([&] {
+                ScopedSshSessionUse sessionUse(cs);
+                return channel->sendEof();
+            }, kArchiveCompletionTimeoutMs, cs);
+        }
     }
-    if (WaitForOperation([&] {
+    if (flushResult >= 0 && sendEofResult >= 0) {
+        waitEofResult = WaitForOperation([&] {
             ScopedSshSessionUse sessionUse(cs);
             return channel->waitEof();
-        }, SSH_AUTH_STAGE_TIMEOUT_MS, cs) < 0) {
-        error = "The remote archive command did not finish.";
-        return false;
+        }, kArchiveCompletionTimeoutMs, cs);
     }
 
+    std::string stderrText;
     std::array<char, 2048> stderrData{};
     for (;;) {
         ssize_t rc = 0;
@@ -228,7 +291,7 @@ bool CloseCommand(std::unique_ptr<ISshChannel>& channel, pConnectSettings cs, bo
             rc = channel->readStderr(stderrData.data(), stderrData.size());
         }
         if (rc > 0) {
-            error.append(stderrData.data(), static_cast<size_t>(rc));
+            stderrText.append(stderrData.data(), static_cast<size_t>(rc));
             continue;
         }
         break;
@@ -247,9 +310,35 @@ bool CloseCommand(std::unique_ptr<ISshChannel>& channel, pConnectSettings cs, bo
         return channel->channelFree();
     }, SSH_AUTH_STAGE_TIMEOUT_MS, cs);
     channel.reset();
-    if (exitStatus != 0) {
+
+    const int sessionError = cs && cs->session ? cs->session->lastErrno() : 0;
+    SFTP_LOG("ARCHIVE", "close flush=%d sendEof=%d waitEof=%d exit=%d sessionError=%d stderr='%s'",
+             flushResult, sendEofResult, waitEofResult, exitStatus, sessionError, stderrText.c_str());
+    const auto appendError = [&](const std::string& detail) {
         if (error.empty())
-            error = "The remote archive command failed.";
+            error = detail;
+        else if (!detail.empty())
+            error += "\n" + detail;
+    };
+    if (exitStatus != 0) {
+        appendError(stderrText.empty()
+            ? "The remote archive command failed (exit status " + std::to_string(exitStatus) + ")."
+            : stderrText);
+        return false;
+    }
+    if (flushResult < 0) {
+        appendError("Could not flush remote archive input (SSH error " + std::to_string(flushResult) + ").");
+        appendError(stderrText);
+        return false;
+    }
+    if (sendEofResult < 0) {
+        appendError("Could not finish remote archive input (SSH error " + std::to_string(sendEofResult) + ").");
+        appendError(stderrText);
+        return false;
+    }
+    if (waitEofResult < 0) {
+        appendError("The remote archive command did not finish (SSH error " + std::to_string(waitEofResult) + ").");
+        appendError(stderrText);
         return false;
     }
     return true;
@@ -269,8 +358,8 @@ bool ReadRemoteChunk(ISshChannel* channel, pConnectSettings cs, char* buffer, si
             error = "Could not read the remote archive stream.";
             return false;
         }
-        if (!WaitForSshIo(cs, DIRECTORY_IO_POLL_MS)) {
-            error = "The remote archive stream timed out.";
+        if (!WaitForArchiveIo(cs)) {
+            error = "The remote archive stream stalled.";
             return false;
         }
     }
@@ -412,6 +501,37 @@ std::string BuildRemoteDeleteCommand(const RemoteEndpoint& source, const std::st
     return command;
 }
 
+std::string RemoteParentPath(const std::string& path)
+{
+    const size_t slash = path.find_last_of('/');
+    if (slash == std::string::npos)
+        return ".";
+    return slash == 0 ? "/" : path.substr(0, slash);
+}
+
+std::string BuildRemoteReceiveCommand(const RemoteEndpoint& target, bool extract)
+{
+    const std::string parent = RemoteParentPath(target.remotePath);
+    // Use only POSIX shell features to create an exclusive temporary file.
+    // mktemp is common, but not required by every minimal remote installation.
+    std::string command = "dir=" + Quote(parent) + "; temp=\"$dir/.sftp-archive.$$\"; n=0; "
+        "while ! (umask 077; set -C; : > \"$temp\") 2>/dev/null; do "
+        "n=$((n + 1)); [ \"$n\" -lt 16 ] || exit 1; temp=\"$dir/.sftp-archive.$$.$n\"; done; "
+        "trap 'rm -f \"$temp\"' 0; "
+        "trap 'rm -f \"$temp\"; exit 1' HUP INT TERM; "
+        "cat > \"$temp\" || exit 1; ";
+    if (extract) {
+        // A complete stream is staged before extraction, and this listing
+        // check rejects truncated TAR data before it can change the target.
+        command += "tar -tf \"$temp\" >/dev/null || exit 1; "
+            "tar -xf \"$temp\" -C " + Quote(target.remotePath) + "; ";
+    } else {
+        command += "mv -f \"$temp\" " + Quote(target.remotePath) + "; ";
+    }
+    command += "exit $?";
+    return command;
+}
+
 bool StreamProducerToPipe(HANDLE pipe, RemoteEndpoint& source, const std::string& command, std::string& error)
 {
     // libssh2 keeps EAGAIN/block-direction state on the session, so a complete
@@ -439,12 +559,28 @@ bool StreamProducerToPipe(HANDLE pipe, RemoteEndpoint& source, const std::string
             break;
         }
     }
+    // The router's local tar consumer must see a stream terminator before the
+    // final result, including when the remote producer failed mid-stream.
     const DWORD endMarker = 0;
-    if (ok && !WriteExact(pipe, &endMarker, sizeof(endMarker))) {
+    if (!WriteExact(pipe, &endMarker, sizeof(endMarker))) {
         error = "Archive receiver disconnected.";
         ok = false;
     }
     return CloseCommand(channel, source.cs, false, error) && ok;
+}
+
+bool DrainArchiveSender(HANDLE pipe)
+{
+    std::array<char, kChunkSize> buffer{};
+    for (;;) {
+        DWORD length = 0;
+        if (!ReadExact(pipe, &length, sizeof(length)))
+            return false;
+        if (length == 0)
+            return true;
+        if (length > buffer.size() || !ReadExact(pipe, buffer.data(), length))
+            return false;
+    }
 }
 
 bool StreamPipeToConsumer(HANDLE pipe, RemoteEndpoint& target, const std::string& command, std::string& error)
@@ -459,6 +595,7 @@ bool StreamPipeToConsumer(HANDLE pipe, RemoteEndpoint& target, const std::string
     SendResult(pipe, 0, "");
     std::array<char, kChunkSize> buffer{};
     bool ok = true;
+    bool drainSender = false;
     for (;;) {
         DWORD length = 0;
         if (!ReadExact(pipe, &length, sizeof(length))) {
@@ -468,14 +605,26 @@ bool StreamPipeToConsumer(HANDLE pipe, RemoteEndpoint& target, const std::string
         }
         if (length == 0)
             break;
-        if (length > buffer.size() || !ReadExact(pipe, buffer.data(), length) ||
-            !WriteRemoteAll(channel.get(), target.cs, buffer.data(), length)) {
-            error = "Could not stream archive data to the remote server.";
+        if (length > buffer.size() || !ReadExact(pipe, buffer.data(), length)) {
+            error = "Archive sender disconnected.";
             ok = false;
             break;
         }
+        if (!WriteRemoteAll(channel.get(), target.cs, buffer.data(), length, error)) {
+            ok = false;
+            // The router is still writing tar output. Drain it before sending
+            // the final result so neither side blocks on a full pipe buffer.
+            drainSender = true;
+            break;
+        }
     }
-    return CloseCommand(channel, target.cs, true, error) && ok;
+    // Drain before closing a failed remote channel. CloseCommand can wait for
+    // an SSH timeout after a disconnect, while tar.exe is still writing.
+    // Reading through the end marker releases tar.exe and avoids a pipe cycle.
+    if (drainSender)
+        DrainArchiveSender(pipe);
+    const bool closeOk = CloseCommand(channel, target.cs, true, error);
+    return closeOk && ok;
 }
 
 bool StreamRemoteToRemote(RemoteEndpoint& source, const std::string& sourceCommand,
@@ -501,8 +650,7 @@ bool StreamRemoteToRemote(RemoteEndpoint& source, const std::string& sourceComma
         }
         if (count == 0)
             break;
-        if (!WriteRemoteAll(targetChannel.get(), target.cs, buffer.data(), static_cast<size_t>(count))) {
-            error = "Could not stream archive data to the target server.";
+        if (!WriteRemoteAll(targetChannel.get(), target.cs, buffer.data(), static_cast<size_t>(count), error)) {
             ok = false;
             break;
         }
@@ -540,9 +688,7 @@ void ServeClient(HANDLE pipe)
     if (request.operation == kArchivePut || request.operation == kArchiveExtract) {
         RemoteEndpoint target;
         if (OpenEndpoint(targetPath, target, error)) {
-            const std::string command = request.operation == kArchivePut
-                ? "cat > " + Quote(target.remotePath)
-                : "tar -xf - -C " + Quote(target.remotePath);
+            const std::string command = BuildRemoteReceiveCommand(target, request.operation == kArchiveExtract);
             ok = StreamPipeToConsumer(pipe, target, command, error);
             if (ok)
                 InvalidateSftpManifestCache(target.cs);
@@ -560,9 +706,7 @@ void ServeClient(HANDLE pipe)
         RemoteEndpoint target;
         if (OpenEndpoint(sourcePath, source, error) && OpenEndpoint(targetPath, target, error)) {
             const std::string sourceCommand = BuildRemotePackCommand(source, items);
-            const std::string targetCommand = request.operation == kArchivePackToRemote
-                ? "cat > " + Quote(target.remotePath)
-                : "tar -xf - -C " + Quote(target.remotePath);
+            const std::string targetCommand = BuildRemoteReceiveCommand(target, request.operation == kArchivePackExtractRemote);
             ok = StreamRemoteToRemote(source, sourceCommand, target, targetCommand, error);
             if (ok)
                 InvalidateSftpManifestCache(target.cs);

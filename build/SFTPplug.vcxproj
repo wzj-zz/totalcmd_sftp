@@ -272,6 +272,8 @@
     </PropertyGroup>
     <ItemGroup>
       <DeployLanguages Include="$(MSBuildThisFileDirectory)..\src\res\language\zh-cn.lng" />
+      <DeploySevenZipRuntime Include="$(MSBuildThisFileDirectory)..\src\archive-router\runtime\7zip\7z.exe" />
+      <DeploySevenZipRuntime Include="$(MSBuildThisFileDirectory)..\src\archive-router\runtime\7zip\7z.dll" />
     </ItemGroup>
     <MakeDir Directories="$(DeployPackageDir);$(DeployPackageDir)language" />
     <Delete Files="$(DeployPackageDir)Initialize-SftpArchiveRouter.ps1" />
@@ -280,6 +282,8 @@
     <Copy SourceFiles="$(MSBuildThisFileDirectory)..\src\help\sftpplug.chm" DestinationFiles="$(DeployPackageDir)SFTPplug.chm" />
     <Copy SourceFiles="$(MSBuildThisFileDirectory)..\src\php\sftp.php" DestinationFiles="$(DeployPackageDir)sftp.php" />
     <Copy SourceFiles="@(DeployLanguages)" DestinationFolder="$(DeployPackageDir)language\" />
+    <Copy SourceFiles="@(DeploySevenZipRuntime)" DestinationFolder="$(DeployPackageDir)" />
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)..\src\archive-router\runtime\7zip\License.txt" DestinationFiles="$(DeployPackageDir)7zip-License.txt" />
   </Target>
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>

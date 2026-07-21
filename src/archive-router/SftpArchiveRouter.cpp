@@ -691,6 +691,15 @@ std::wstring GetTarPath()
 
 std::wstring Get7ZipPath()
 {
+    std::array<wchar_t, 32768> modulePath{};
+    const DWORD moduleLength = GetModuleFileNameW(nullptr, modulePath.data(), static_cast<DWORD>(modulePath.size()));
+    if (moduleLength > 0 && moduleLength < modulePath.size()) {
+        const std::filesystem::path bundled = std::filesystem::path(std::wstring(modulePath.data(), moduleLength)).parent_path() / L"7z.exe";
+        const std::filesystem::path bundledDll = bundled.parent_path() / L"7z.dll";
+        if (std::filesystem::is_regular_file(bundled) && std::filesystem::is_regular_file(bundledDll))
+            return bundled.wstring();
+    }
+
     std::array<wchar_t, 32768> path{};
     const DWORD found = SearchPathW(nullptr, L"7z.exe", nullptr, static_cast<DWORD>(path.size()), path.data(), nullptr);
     if (found > 0 && found < path.size())
@@ -780,7 +789,7 @@ bool ExtractWith7Zip(const std::wstring& archive, const std::wstring& destinatio
 {
     const std::wstring sevenZip = Get7ZipPath();
     if (sevenZip.empty()) {
-        error = L"7z.exe was not found. Install 7-Zip or add its directory to PATH.";
+        error = L"7-Zip is unavailable. Restore the bundled 7z.exe and 7z.dll, or install 7-Zip.";
         return false;
     }
     const std::wstring command = L"\"" + sevenZip + L"\" x -y -bd -o\"" + destination + L"\" \"" + archive + L"\"";
@@ -843,6 +852,18 @@ bool WriteTopLevelList(const std::wstring& directory, const std::wstring& listPa
     }
     CloseHandle(file);
     return ok && !error;
+}
+
+bool CreateStagingFilePath(const std::wstring& target, std::wstring& staging)
+{
+    const std::filesystem::path parent = std::filesystem::path(target).parent_path();
+    if (parent.empty())
+        return false;
+    std::array<wchar_t, MAX_PATH> name{};
+    if (!GetTempFileNameW(parent.c_str(), L"SFA", 0, name.data()))
+        return false;
+    staging = name.data();
+    return true;
 }
 
 bool CopyExtractedContents(const std::wstring& source, const std::wstring& target, std::wstring& error)
@@ -1044,7 +1065,13 @@ int StreamSftpArchiveToLocalFile(const std::wstring& sourceArchive, const std::w
         ShowError(FromUtf8(error));
         return 1;
     }
-    HANDLE output = CreateFileW(localArchive.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+    std::wstring staging;
+    if (!CreateStagingFilePath(localArchive, staging)) {
+        CloseHandle(pipe);
+        ShowError(L"Could not create a temporary local archive file.");
+        return 2;
+    }
+    HANDLE output = CreateFileW(staging.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                                 FILE_ATTRIBUTE_NORMAL, nullptr);
     const bool copied = output != INVALID_HANDLE_VALUE && ReceiveArchivePipeToFile(pipe, output);
     if (output != INVALID_HANDLE_VALUE)
@@ -1052,8 +1079,13 @@ int StreamSftpArchiveToLocalFile(const std::wstring& sourceArchive, const std::w
     const bool remoteOk = copied && ReadResult(pipe, error);
     CloseHandle(pipe);
     if (!copied || !remoteOk) {
-        DeleteFileW(localArchive.c_str());
+        DeleteFileW(staging.c_str());
         ShowError(error.empty() ? L"Could not save the remote archive locally." : FromUtf8(error));
+        return 1;
+    }
+    if (!MoveFileExW(staging.c_str(), localArchive.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(staging.c_str());
+        ShowError(L"Could not replace the local archive file.");
         return 1;
     }
     return 0;
@@ -1078,7 +1110,13 @@ int StreamSftpPackToLocalFile(const std::wstring& sourcePath, std::string_view i
         ShowError(FromUtf8(error));
         return 1;
     }
-    HANDLE output = CreateFileW(localArchive.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+    std::wstring staging;
+    if (!CreateStagingFilePath(localArchive, staging)) {
+        CloseHandle(pipe);
+        ShowError(L"Could not create a temporary local archive file.");
+        return 2;
+    }
+    HANDLE output = CreateFileW(staging.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                                 FILE_ATTRIBUTE_NORMAL, nullptr);
     const bool copied = output != INVALID_HANDLE_VALUE && ReceiveArchivePipeToFile(pipe, output);
     if (output != INVALID_HANDLE_VALUE)
@@ -1086,8 +1124,13 @@ int StreamSftpPackToLocalFile(const std::wstring& sourcePath, std::string_view i
     const bool remoteOk = copied && ReadResult(pipe, error);
     CloseHandle(pipe);
     if (!copied || !remoteOk) {
-        DeleteFileW(localArchive.c_str());
+        DeleteFileW(staging.c_str());
         ShowError(error.empty() ? L"Could not create the remote archive locally." : FromUtf8(error));
+        return 1;
+    }
+    if (!MoveFileExW(staging.c_str(), localArchive.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(staging.c_str());
+        ShowError(L"Could not replace the local archive file.");
         return 1;
     }
     return 0;
@@ -1125,18 +1168,31 @@ bool DeleteLocalSource(const std::wstring& sourcePath, const std::vector<std::ws
     return true;
 }
 
-bool DeleteSftpSource(const std::wstring& sourcePath, std::string_view items)
+bool DeleteSftpSource(const std::wstring& sourcePath, std::string_view items, bool sourceCleanup = false)
 {
     HANDLE pipe = OpenArchivePipe();
     if (pipe == INVALID_HANDLE_VALUE) {
-        ShowError(L"The target received the TAR stream, but the SFTP archive service is unavailable for source cleanup.");
+        const DWORD error = GetLastError();
+        if (error == ERROR_PIPE_BUSY) {
+            ShowError(L"An SFTP archive operation is already running. Wait for it to finish before deleting remote items.");
+        } else if (sourceCleanup) {
+            ShowError(L"The target received the TAR stream, but the SFTP archive service is unavailable for source cleanup.");
+        } else {
+            ShowError(L"The SFTP archive service is unavailable for remote deletion.");
+        }
         return false;
     }
     std::string error;
     const bool ok = StartArchiveRequest(pipe, kArchiveDeleteRemote, sourcePath, L"", items, error);
     CloseHandle(pipe);
     if (!ok) {
-        ShowError(error.empty() ? L"The target received the TAR stream, but a remote source item could not be deleted." : FromUtf8(error));
+        if (!error.empty()) {
+            ShowError(FromUtf8(error));
+        } else if (sourceCleanup) {
+            ShowError(L"The target received the TAR stream, but a remote source item could not be deleted.");
+        } else {
+            ShowError(L"Could not delete the selected remote items.");
+        }
         return false;
     }
     return true;
@@ -1287,75 +1343,32 @@ int StreamSftpPackToLocalExtraction(const std::wstring& sourcePath, std::string_
         ShowError(L"Windows tar.exe was not found.");
         return 2;
     }
-    HANDLE pipe = OpenArchivePipe();
-    if (pipe == INVALID_HANDLE_VALUE) {
-        ShowError(L"The installed SFTP plugin does not provide the archive service. Replace the WFX file and restart Total Commander.");
+    TemporaryDirectory temporary;
+    if (!temporary) {
+        ShowError(L"Could not create the temporary archive directory.");
         return 2;
     }
-    std::string error;
-    if (!StartArchiveRequest(pipe, kArchivePack, sourcePath, L"", items, error)) {
-        CloseHandle(pipe);
-        ShowError(FromUtf8(error));
+    const std::wstring archive = JoinPath(temporary.path(), L"archive.tar");
+    if (StreamSftpPackToLocalFile(sourcePath, items, archive) != 0)
+        return 1;
+
+    const std::wstring extracted = JoinPath(temporary.path(), L"extracted");
+    if (!CreateDirectoryW(extracted.c_str(), nullptr)) {
+        ShowError(L"Could not create the temporary extraction directory.");
+        return 2;
+    }
+    std::string output;
+    const std::wstring command = QuoteWindowsArgument(tarPath) + L" -xf " +
+        QuoteWindowsArgument(archive) + L" -C " + QuoteWindowsArgument(extracted);
+    if (!RunHiddenProcess(tarPath, command, output)) {
+        if (output.size() > 1800)
+            output.erase(0, output.size() - 1800);
+        ShowError(output.empty() ? L"Windows tar.exe could not extract the remote archive." : FromUtf8(output));
         return 1;
     }
-    SECURITY_ATTRIBUTES inheritable{ sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE };
-    HANDLE stdinRead = nullptr;
-    HANDLE stdinWrite = nullptr;
-    HANDLE stderrRead = nullptr;
-    HANDLE stderrWrite = nullptr;
-    if (!CreatePipe(&stdinRead, &stdinWrite, &inheritable, 0) ||
-        !CreatePipe(&stderrRead, &stderrWrite, &inheritable, 0)) {
-        if (stdinRead) CloseHandle(stdinRead);
-        if (stdinWrite) CloseHandle(stdinWrite);
-        if (stderrRead) CloseHandle(stderrRead);
-        if (stderrWrite) CloseHandle(stderrWrite);
-        CloseHandle(pipe);
-        ShowError(L"Could not create local TAR pipes.");
-        return 2;
-    }
-    SetHandleInformation(stdinWrite, HANDLE_FLAG_INHERIT, 0);
-    SetHandleInformation(stderrRead, HANDLE_FLAG_INHERIT, 0);
-    STARTUPINFOW startup{};
-    startup.cb = sizeof(startup);
-    startup.dwFlags = STARTF_USESTDHANDLES;
-    startup.hStdInput = stdinRead;
-    startup.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-    startup.hStdError = stderrWrite;
-    PROCESS_INFORMATION process{};
-    const std::wstring targetDirectory = NormalizeLocalDirectory(targetPath);
-    LocalTarInvocation invocation = CreateLocalTarInvocation(tarPath, targetDirectory, L" -xf - -C ", L"");
-    if (invocation.executable.empty() || !CreateProcessW(invocation.executable.c_str(), invocation.command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
-                        nullptr, nullptr, &startup, &process)) {
-        CloseHandle(pipe); CloseHandle(stdinRead); CloseHandle(stdinWrite); CloseHandle(stderrRead); CloseHandle(stderrWrite);
-        ShowError(L"Could not start Windows tar.exe.");
-        return 2;
-    }
-    CloseHandle(stdinRead);
-    CloseHandle(stderrWrite);
-    std::string tarError;
-    std::thread drainStderr([&] {
-        std::array<char, 4096> buffer{};
-        DWORD count = 0;
-        while (ReadFile(stderrRead, buffer.data(), static_cast<DWORD>(buffer.size()), &count, nullptr) && count)
-            tarError.append(buffer.data(), count);
-        CloseHandle(stderrRead);
-    });
-    const bool copied = ReceiveArchivePipeToFile(pipe, stdinWrite);
-    CloseHandle(stdinWrite);
-    WaitForSingleObject(process.hProcess, INFINITE);
-    DWORD tarExit = 1;
-    GetExitCodeProcess(process.hProcess, &tarExit);
-    CloseHandle(process.hThread);
-    CloseHandle(process.hProcess);
-    drainStderr.join();
-    const bool remoteOk = copied && ReadResult(pipe, error);
-    CloseHandle(pipe);
-    if (tarExit != 0) {
-        ShowError(tarError.empty() ? L"Windows tar.exe could not extract the remote TAR stream." : FromUtf8(tarError));
-        return 1;
-    }
-    if (!remoteOk) {
-        ShowError(error.empty() ? L"Could not read the remote TAR stream." : FromUtf8(error));
+    std::wstring copyError;
+    if (!CopyExtractedContents(extracted, targetPath, copyError)) {
+        ShowError(copyError);
         return 1;
     }
     return 0;
@@ -1562,7 +1575,7 @@ int Move(const std::wstring& sourcePath, const std::wstring& targetPath, const s
 
     // Only delete after the target command has completed successfully.
     if (sourceSftp)
-        return DeleteSftpSource(sourcePath, itemText) ? 0 : 1;
+        return DeleteSftpSource(sourcePath, itemText, true) ? 0 : 1;
     return DeleteLocalSource(sourcePath, items) ? 0 : 1;
 }
 
