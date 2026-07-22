@@ -1,6 +1,7 @@
 #include "global.h"
 #include <windows.h>
 #include <array>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -252,8 +253,23 @@ std::unique_ptr<ISshChannel> StartCommand(pConnectSettings cs, const std::string
     return {};
 }
 
+void DrainCommandStderr(ISshChannel* channel, pConnectSettings cs, std::string& stderrText)
+{
+    std::array<char, 2048> stderrData{};
+    for (;;) {
+        ssize_t rc = 0;
+        {
+            ScopedSshSessionUse sessionUse(cs);
+            rc = channel->readStderr(stderrData.data(), stderrData.size());
+        }
+        if (rc <= 0)
+            return;
+        stderrText.append(stderrData.data(), static_cast<size_t>(rc));
+    }
+}
+
 bool CloseCommand(std::unique_ptr<ISshChannel>& channel, pConnectSettings cs, bool sendEof,
-                  std::string& error)
+                   std::string& error)
 {
     if (!channel)
         return false;
@@ -275,27 +291,26 @@ bool CloseCommand(std::unique_ptr<ISshChannel>& channel, pConnectSettings cs, bo
             }, kArchiveCompletionTimeoutMs, cs);
         }
     }
-    if (flushResult >= 0 && sendEofResult >= 0) {
-        waitEofResult = WaitForOperation([&] {
-            ScopedSshSessionUse sessionUse(cs);
-            return channel->waitEof();
-        }, kArchiveCompletionTimeoutMs, cs);
-    }
-
     std::string stderrText;
-    std::array<char, 2048> stderrData{};
-    for (;;) {
-        ssize_t rc = 0;
-        {
-            ScopedSshSessionUse sessionUse(cs);
-            rc = channel->readStderr(stderrData.data(), stderrData.size());
+    if (flushResult >= 0 && sendEofResult >= 0) {
+        const auto eofStart = std::chrono::steady_clock::now();
+        for (;;) {
+            // A remote tar can emit enough diagnostics to fill SSH stderr before
+            // it reaches EOF. Drain it here so waitEof cannot deadlock.
+            DrainCommandStderr(channel.get(), cs, stderrText);
+            {
+                ScopedSshSessionUse sessionUse(cs);
+                waitEofResult = channel->waitEof();
+            }
+            if (waitEofResult != LIBSSH2_ERROR_EAGAIN)
+                break;
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - eofStart).count();
+            if (elapsed >= kArchiveCompletionTimeoutMs || !WaitForArchiveIo(cs))
+                break;
         }
-        if (rc > 0) {
-            stderrText.append(stderrData.data(), static_cast<size_t>(rc));
-            continue;
-        }
-        break;
     }
+    DrainCommandStderr(channel.get(), cs, stderrText);
     int exitStatus = 1;
     {
         ScopedSshSessionUse sessionUse(cs);
@@ -368,6 +383,75 @@ bool ReadRemoteChunk(ISshChannel* channel, pConnectSettings cs, char* buffer, si
 std::string Quote(const std::string& text)
 {
     return "'" + string_util::ShellQuoteSingle(text) + "'";
+}
+
+bool IsWindowsRemotePath(const std::string& path)
+{
+    return path.size() >= 3 && path[0] == '/' &&
+        ((path[1] >= 'A' && path[1] <= 'Z') || (path[1] >= 'a' && path[1] <= 'z')) && path[2] == ':';
+}
+
+std::wstring ToWindowsPath(const std::string& path)
+{
+    std::wstring result = unicode_util::utf8_to_wstring(path);
+    std::replace(result.begin(), result.end(), L'/', L'\\');
+    if (!result.empty() && result.front() == L'\\')
+        result.erase(result.begin());
+    return result;
+}
+
+std::wstring QuotePowerShell(const std::wstring& text)
+{
+    std::wstring quoted(L"'");
+    for (const wchar_t character : text) {
+        if (character == L'\'')
+            quoted += L"''";
+        else
+            quoted.push_back(character);
+    }
+    quoted.push_back(L'\'');
+    return quoted;
+}
+
+std::string EncodePowerShellCommand(const std::wstring& script)
+{
+    static constexpr char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string bytes;
+    bytes.reserve(script.size() * sizeof(wchar_t));
+    for (const wchar_t character : script) {
+        bytes.push_back(static_cast<char>(character & 0xFF));
+        bytes.push_back(static_cast<char>(character >> 8));
+    }
+    std::string encoded;
+    encoded.reserve((bytes.size() + 2) / 3 * 4);
+    for (size_t offset = 0; offset < bytes.size(); offset += 3) {
+        const unsigned value = static_cast<unsigned char>(bytes[offset]) << 16 |
+            (offset + 1 < bytes.size() ? static_cast<unsigned char>(bytes[offset + 1]) << 8 : 0) |
+            (offset + 2 < bytes.size() ? static_cast<unsigned char>(bytes[offset + 2]) : 0);
+        encoded.push_back(alphabet[(value >> 18) & 0x3F]);
+        encoded.push_back(alphabet[(value >> 12) & 0x3F]);
+        encoded.push_back(offset + 1 < bytes.size() ? alphabet[(value >> 6) & 0x3F] : '=');
+        encoded.push_back(offset + 2 < bytes.size() ? alphabet[value & 0x3F] : '=');
+    }
+    // Prevent PowerShell from consuming the SSH channel as pipeline input.
+    // Archive data is read explicitly through Console.OpenStandardInput().
+    return "powershell.exe -NoProfile -NonInteractive -InputFormat None -EncodedCommand " + encoded;
+}
+
+std::string QuoteCmdArgument(const std::wstring& text)
+{
+    std::string quoted("\"");
+    for (const wchar_t character : text) {
+        if (character == L'\"')
+            quoted += "\\\"";
+        else {
+            char encoded[4]{};
+            const int length = WideCharToMultiByte(CP_UTF8, 0, &character, 1, encoded, sizeof(encoded), nullptr, nullptr);
+            quoted.append(encoded, length > 0 ? static_cast<size_t>(length) : 0);
+        }
+    }
+    quoted += "\"";
+    return quoted;
 }
 
 bool ReadCommandOutput(std::unique_ptr<ISshChannel>& channel, pConnectSettings cs,
@@ -449,8 +533,24 @@ bool PrewarmManifest(const std::string& sourcePath, std::string& error)
     RemoteEndpoint endpoint;
     if (!OpenEndpoint(sourcePath, endpoint, error))
         return false;
-    const std::string command = "find " + Quote(endpoint.remotePath) +
-        " -printf '%y\\000%s\\000%T@\\000%P\\000'";
+    std::string command;
+    if (IsWindowsRemotePath(endpoint.remotePath)) {
+        const std::wstring root = ToWindowsPath(endpoint.remotePath);
+        const std::wstring script =
+            L"$root=(Get-Item -LiteralPath " + QuotePowerShell(root) + L").FullName.TrimEnd('\\');"
+            L"$output=[Console]::OpenStandardOutput();"
+            L"$entries=@(Get-Item -LiteralPath $root)+@(Get-ChildItem -LiteralPath $root -Recurse -Force);"
+            L"foreach($entry in $entries){"
+                L"$type=if($entry.PSIsContainer){'d'}elseif($entry.Attributes -band [IO.FileAttributes]::ReparsePoint){'l'}else{'f'};"
+                L"$size=if($entry.PSIsContainer){0}else{$entry.Length};"
+                L"$time=([DateTimeOffset]$entry.LastWriteTimeUtc).ToUnixTimeSeconds();"
+                L"$name=if($entry.FullName -eq $root){'.'}else{$entry.FullName.Substring($root.Length).TrimStart('\\').Replace('\\','/')};"
+                L"$bytes=[Text.Encoding]::UTF8.GetBytes(\"$type`0$size`0$time`0$name`0\");$output.Write($bytes,0,$bytes.Length)"
+            L"}";
+        command = EncodePowerShellCommand(script);
+    } else {
+        command = "find " + Quote(endpoint.remotePath) + " -printf '%y\\000%s\\000%T@\\000%P\\000'";
+    }
     auto channel = StartCommand(endpoint.cs, command, error);
     if (!channel)
         return false;
@@ -469,6 +569,22 @@ bool PrewarmManifest(const std::string& sourcePath, std::string& error)
 
 std::string BuildRemotePackCommand(const RemoteEndpoint& source, const std::string& itemList)
 {
+    if (IsWindowsRemotePath(source.remotePath)) {
+        std::string command = "tar.exe -cf - -C " + QuoteCmdArgument(ToWindowsPath(source.remotePath)) + " --";
+        if (itemList.empty())
+            return command + " .";
+        size_t start = 0;
+        while (start < itemList.size()) {
+            const size_t end = itemList.find('\n', start);
+            const std::string item = itemList.substr(start, end == std::string::npos ? std::string::npos : end - start);
+            if (!item.empty())
+                command += " " + QuoteCmdArgument(unicode_util::utf8_to_wstring(item));
+            if (end == std::string::npos)
+                break;
+            start = end + 1;
+        }
+        return command;
+    }
     std::string command = "tar -cf - -C " + Quote(source.remotePath) + " --";
     if (itemList.empty())
         return command + " .";
@@ -487,6 +603,22 @@ std::string BuildRemotePackCommand(const RemoteEndpoint& source, const std::stri
 
 std::string BuildRemoteDeleteCommand(const RemoteEndpoint& source, const std::string& itemList)
 {
+    if (IsWindowsRemotePath(source.remotePath)) {
+        std::wstring script;
+        const std::wstring root = QuotePowerShell(ToWindowsPath(source.remotePath));
+        size_t start = 0;
+        while (start < itemList.size()) {
+            const size_t end = itemList.find('\n', start);
+            const std::string item = itemList.substr(start, end == std::string::npos ? std::string::npos : end - start);
+            if (!item.empty())
+                script += L"Remove-Item -LiteralPath (Join-Path -Path " + root + L" -ChildPath " +
+                    QuotePowerShell(unicode_util::utf8_to_wstring(item)) + L") -Recurse -Force -ErrorAction Stop;";
+            if (end == std::string::npos)
+                break;
+            start = end + 1;
+        }
+        return EncodePowerShellCommand(script);
+    }
     std::string command = "cd " + Quote(source.remotePath) + " && rm -rf --";
     size_t start = 0;
     while (start < itemList.size()) {
@@ -511,6 +643,25 @@ std::string RemoteParentPath(const std::string& path)
 
 std::string BuildRemoteReceiveCommand(const RemoteEndpoint& target, bool extract)
 {
+    if (IsWindowsRemotePath(target.remotePath)) {
+        const std::wstring targetPath = ToWindowsPath(target.remotePath);
+        const std::wstring path = QuotePowerShell(targetPath);
+        if (!extract) {
+            return EncodePowerShellCommand(
+                L"$input=[Console]::OpenStandardInput();$parent=[IO.Path]::GetDirectoryName(" + path +
+                L");if(-not [IO.Directory]::Exists($parent)){exit 1};"
+                L"$temp=[IO.Path]::Combine($parent,'.sftp-archive-'+[guid]::NewGuid().ToString()+'.tmp');"
+                L"$file=[IO.File]::Open($temp,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None);"
+                L"$exitCode=1;try{$input.CopyTo($file);$file.Dispose();$file=$null;& tar.exe -tf $temp *> $null;"
+                L"if($LASTEXITCODE -eq 0){if([IO.File]::Exists(" + path +
+                L")){[IO.File]::Replace($temp," + path + L",$null)}else{[IO.File]::Move($temp," + path +
+                L")};$exitCode=0}}finally{if($file){$file.Dispose()};$input.Dispose();"
+                L"Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue};exit $exitCode");
+        }
+        // tar.exe reads the SSH channel directly. PowerShell's standard-input
+        // wrapper can stall after large archive streams on Windows OpenSSH.
+        return "tar.exe -xf - -C " + QuoteCmdArgument(targetPath);
+    }
     const std::string parent = RemoteParentPath(target.remotePath);
     // Use only POSIX shell features to create an exclusive temporary file.
     // mktemp is common, but not required by every minimal remote installation.
@@ -530,6 +681,15 @@ std::string BuildRemoteReceiveCommand(const RemoteEndpoint& target, bool extract
     }
     command += "exit $?";
     return command;
+}
+
+std::string BuildRemoteReadFileCommand(const RemoteEndpoint& source)
+{
+    if (!IsWindowsRemotePath(source.remotePath))
+        return "cat " + Quote(source.remotePath);
+    return EncodePowerShellCommand(
+        L"$file=[IO.File]::OpenRead(" + QuotePowerShell(ToWindowsPath(source.remotePath)) + L");"
+        L"try{$file.CopyTo([Console]::OpenStandardOutput())}finally{$file.Dispose()}");
 }
 
 bool StreamProducerToPipe(HANDLE pipe, RemoteEndpoint& source, const std::string& command, std::string& error)
@@ -697,7 +857,7 @@ void ServeClient(HANDLE pipe)
         RemoteEndpoint source;
         if (OpenEndpoint(sourcePath, source, error)) {
             const std::string command = request.operation == kArchiveGet
-                ? "cat " + Quote(source.remotePath)
+                ? BuildRemoteReadFileCommand(source)
                 : BuildRemotePackCommand(source, items);
             ok = StreamProducerToPipe(pipe, source, command, error);
         }

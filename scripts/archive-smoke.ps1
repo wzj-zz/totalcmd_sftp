@@ -2,6 +2,7 @@ param(
     [Parameter(Mandatory)] [string]$TotalCommanderPath,
     [Parameter(Mandatory)] [string[]]$Sessions,
     [Parameter(Mandatory)] [string[]]$WslDistros,
+    [Parameter(Mandatory)] [string]$WindowsSession,
     [string]$Fixture = (Join-Path (Split-Path -Parent $PSScriptRoot) 'tests\fixtures\.oh-my-zsh.zip'),
     [switch]$KeepArtifacts
 )
@@ -52,6 +53,17 @@ function Quote-Remote([string]$Value) {
 function Invoke-Remote($Session, [string]$Command) {
     $null = & ssh @($Session.SshArgs) $Session.Target $Command 2>&1
     if ($LASTEXITCODE -ne 0) { throw "$($Session.Label): ssh command failed ($LASTEXITCODE)" }
+}
+
+function ConvertTo-PowerShellEncodedCommand([string]$Script) {
+    return [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Script))
+}
+
+function Invoke-WindowsRemote($Session, [string]$Script) {
+    $command = 'powershell.exe -NoProfile -NonInteractive -EncodedCommand ' + (ConvertTo-PowerShellEncodedCommand $Script)
+    $output = & ssh @($Session.SshArgs) $Session.Target $command 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "$($Session.Label): Windows SSH command failed ($LASTEXITCODE)" }
+    return @($output)
 }
 
 function Test-RemotePath($Session, [string]$Path) {
@@ -122,12 +134,35 @@ function Wait-ForSession([string]$Path, [int]$Index) {
     throw "remote session #$Index did not become active: $($error.Trim())"
 }
 
+function Invoke-RouterPrewarm([string]$Path, [string]$Name) {
+    $errorFile = Join-Path $script:WorkRoot "$Name.err"
+    $info = [System.Diagnostics.ProcessStartInfo]::new()
+    $info.FileName = $script:Router
+    $info.UseShellExecute = $false
+    $info.RedirectStandardError = $true
+    foreach ($argument in @('selftest-prewarm', $Path, $errorFile)) { [void]$info.ArgumentList.Add($argument) }
+    $process = [System.Diagnostics.Process]::Start($info)
+    $process.WaitForExit()
+    $standardError = $process.StandardError.ReadToEnd()
+    if ($process.ExitCode -ne 0) {
+        $error = if (Test-Path -LiteralPath $errorFile) { Get-Content -LiteralPath $errorFile -Raw } else { '' }
+        if (-not $error) { $error = $standardError }
+        throw "router prewarm failed: $($error.Trim())"
+    }
+}
+
 function Start-TotalCommanderSessions([string]$Executable, [string]$LeftPath, [string]$RightPath) {
     $info = [System.Diagnostics.ProcessStartInfo]::new()
     $info.FileName = $Executable
     $info.UseShellExecute = $false
     foreach ($argument in @('/O', "/L=$LeftPath", "/R=$RightPath")) { [void]$info.ArgumentList.Add($argument) }
     [System.Diagnostics.Process]::Start($info).Dispose()
+}
+
+function Activate-RemoteSessions([string]$Executable, [string]$LeftPath, [int]$LeftIndex, [string]$RightPath, [int]$RightIndex) {
+    Start-TotalCommanderSessions $Executable $LeftPath $RightPath
+    Wait-ForSession $LeftPath $LeftIndex
+    Wait-ForSession $RightPath $RightIndex
 }
 
 function Remove-UncArtifacts([string[]]$Distros, [string]$RunId) {
@@ -151,6 +186,29 @@ function Assert-RemoteFile($Session, [string]$Path) {
     Invoke-Remote $Session "grep -qx archive-smoke $(Quote-Remote $Path)"
 }
 
+function Assert-WindowsRemoteFile($Session, [string]$Path) {
+    $literal = $Path.Replace("'", "''")
+    Invoke-WindowsRemote $Session "if (-not (Test-Path -LiteralPath '$literal' -PathType Leaf)) { exit 1 }; if ((Get-Content -LiteralPath '$literal' -Raw).Trim() -ne 'archive-smoke') { exit 1 }" | Out-Null
+}
+
+function Test-WindowsRemotePath($Session, [string]$Path) {
+    $literal = $Path.Replace("'", "''")
+    $command = 'powershell.exe -NoProfile -NonInteractive -EncodedCommand ' + (ConvertTo-PowerShellEncodedCommand "if (Test-Path -LiteralPath '$literal') { exit 0 }; exit 1")
+    $null = & ssh @($Session.SshArgs) $Session.Target $command 2>&1
+    return $LASTEXITCODE -eq 0
+}
+
+function Assert-WindowsRemoteTarEntry($Session, [string]$Path, [string]$Entry) {
+    $pathLiteral = $Path.Replace("'", "''")
+    $entryLiteral = $Entry.Replace("'", "''")
+    Invoke-WindowsRemote $Session "`$entries=@(& tar.exe -tf '$pathLiteral'); if (`$LASTEXITCODE -ne 0 -or `$entries -notcontains '$entryLiteral') { exit 1 }" | Out-Null
+}
+
+function Assert-WindowsNoArchiveTemps($Session, [string]$Path) {
+    $pathLiteral = $Path.Replace("'", "''")
+    Invoke-WindowsRemote $Session "if (@(Get-ChildItem -LiteralPath '$pathLiteral' -Filter '.sftp-archive-*.tmp' -File -Force -ErrorAction SilentlyContinue).Count -ne 0) { exit 1 }" | Out-Null
+}
+
 function Run-Case([string]$Name, [scriptblock]$Action) {
     try { & $Action; Add-Result $Name 'PASS' } catch { Add-Result $Name 'FAIL' $_.Exception.Message }
 }
@@ -163,6 +221,7 @@ $Sessions = Split-Names $Sessions
 $WslDistros = Split-Names $WslDistros
 if ($Sessions.Count -ne 2) { throw 'Pass exactly two SFTP session display names with -Sessions.' }
 if ($WslDistros.Count -lt 1) { throw 'Pass at least one WSL distribution name with -WslDistros.' }
+if (-not $WindowsSession.Trim()) { throw 'Pass the Windows OpenSSH SFTP session display name with -WindowsSession.' }
 
 $TotalCommanderPath = [System.IO.Path]::GetFullPath($TotalCommanderPath)
 $Fixture = [System.IO.Path]::GetFullPath($Fixture)
@@ -183,6 +242,9 @@ try {
         if (-not $iniData.ContainsKey($Sessions[$index])) { throw "remote session #$($index + 1) is not in sftpplug.ini" }
         $remote += Get-SshSession $Sessions[$index] $iniData[$Sessions[$index]] ($index + 1)
     }
+    if (-not $iniData.ContainsKey($WindowsSession)) { throw 'Windows SSH session is not in sftpplug.ini' }
+    $windowsRemote = Get-SshSession $WindowsSession $iniData[$WindowsSession] 3
+    $windowsRemote.Label = 'Windows SSH session'
     $uncTargets = @()
     for ($index = 0; $index -lt $WslDistros.Count; $index++) {
         $wslTmp = Join-Path (Join-Path '\\wsl.localhost' $WslDistros[$index]) 'tmp'
@@ -197,6 +259,11 @@ try {
     $sftp2 = "\\SFTP\$($Sessions[1])\tmp\sftpplug-archive-smoke-$script:RunId"
     $tcSftp1 = "\\\SFTP\$($Sessions[0])\tmp\sftpplug-archive-smoke-$script:RunId"
     $tcSftp2 = "\\\SFTP\$($Sessions[1])\tmp\sftpplug-archive-smoke-$script:RunId"
+    $windowsTemp = (Invoke-WindowsRemote $windowsRemote '[Console]::Write($env:TEMP)' | Out-String).Trim()
+    if (-not $windowsTemp) { throw 'Windows SSH session did not return a temporary directory.' }
+    $windowsRoot = $windowsTemp.TrimEnd('\') + "\SftpArchiveSmoke-$script:RunId"
+    $sftpWindows = "\\SFTP\$WindowsSession\$windowsRoot"
+    $tcSftpWindows = "\\\SFTP\$WindowsSession\$windowsRoot"
     $local = Join-Path $script:WorkRoot 'local'
     New-Item -ItemType Directory -Path $local -Force | Out-Null
     foreach ($uncTarget in $uncTargets) { New-Item -ItemType Directory -Path $uncTarget -Force | Out-Null }
@@ -220,12 +287,17 @@ try {
     foreach ($session in $remote) {
         Invoke-Remote $session "rm -rf $(Quote-Remote $r1); mkdir -p $(Quote-Remote "$r1/source/payload/nested") $(Quote-Remote "$r1/f5") $(Quote-Remote "$r1/f6") $(Quote-Remote "$r1/f7") $(Quote-Remote "$r1/f8"); printf archive-smoke > $(Quote-Remote "$r1/source/payload/nested/value.txt")"
     }
+    $windowsRootLiteral = $windowsRoot.Replace("'", "''")
+    Invoke-WindowsRemote $windowsRemote "New-Item -ItemType Directory -Path '$windowsRootLiteral\source\payload\nested','$windowsRootLiteral\f5','$windowsRootLiteral\f6','$windowsRootLiteral\f7','$windowsRootLiteral\f8' -Force | Out-Null; Set-Content -LiteralPath '$windowsRootLiteral\source\payload\nested\value.txt' -Value 'archive-smoke' -NoNewline" | Out-Null
 
     $tc = Join-Path $TotalCommanderPath 'TOTALCMD64.EXE'
-    Start-TotalCommanderSessions $tc $tcSftp1 $tcSftp2
-    Wait-ForSession "$sftp1\source" 1
-    Wait-ForSession "$sftp2\source" 2
-    Add-Result 'active WFX session #1 and #2' 'PASS'
+    Activate-RemoteSessions $tc "$tcSftp1\source" 1 "$tcSftp2\source" 2
+    Add-Result 'active WFX sessions #1 and #2' 'PASS'
+    Activate-RemoteSessions $tc "$tcSftpWindows\source" 3 "$tcSftp1\source" 1
+    Run-Case 'Alt+F11 Windows remote directory prewarm' {
+        Invoke-RouterPrewarm "$sftpWindows\source" 'f11-windows-prewarm'
+    }
+    Activate-RemoteSessions $tc "$tcSftp1\source" 1 "$tcSftp2\source" 2
 
     Run-Case 'Alt+F5 local -> remote archive' {
         Invoke-Router pack $local "$sftp1\f5\local.tar" (Join-Path $local 'payload') 'f5-local'
@@ -257,6 +329,38 @@ try {
         Invoke-Router pack "$sftp1\source" "$sftp2\f5\cross.tar" "$sftp1\source\payload" 'f5-cross'
         Invoke-Remote $remote[1] "tar -tf $(Quote-Remote "$r2/f5/cross.tar") | grep -q payload/nested/value.txt"
     }
+    Activate-RemoteSessions $tc "$tcSftpWindows\source" 3 "$tcSftp1\source" 1
+    Run-Case 'Alt+F5 local -> Windows remote archive' {
+        $target = "$sftpWindows\f5\local.tar"
+        Invoke-Router pack $local $target (Join-Path $local 'payload') 'f5-local-windows'
+        Assert-WindowsRemoteTarEntry $windowsRemote "$windowsRoot\f5\local.tar" 'payload/nested/value.txt'
+        Assert-WindowsNoArchiveTemps $windowsRemote "$windowsRoot\f5"
+    }
+    Run-Case 'Alt+F5 failed Windows archive preserves existing target' {
+        Assert-RouterFails pack "$sftp1\source" "$sftpWindows\f5\local.tar" "$sftp1\source\missing.tar" 'f5-failed-windows-preserves'
+        Assert-WindowsRemoteTarEntry $windowsRemote "$windowsRoot\f5\local.tar" 'payload/nested/value.txt'
+        Assert-WindowsNoArchiveTemps $windowsRemote "$windowsRoot\f5"
+    }
+    Run-Case 'Alt+F5 WSL UNC -> Windows remote archive' {
+        $source = Join-Path $uncTargets[0] 'f5-windows-source'; New-Item -ItemType Directory -Path (Join-Path $source 'payload\nested') -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $source 'payload\nested\value.txt'), 'archive-smoke')
+        Invoke-Router pack $source "$sftpWindows\f5\unc.tar" (Join-Path $source 'payload') 'f5-unc-windows'
+        Assert-WindowsRemoteTarEntry $windowsRemote "$windowsRoot\f5\unc.tar" 'payload/nested/value.txt'
+    }
+    Run-Case 'Alt+F5 Unix remote -> Windows remote archive' {
+        Invoke-Router pack "$sftp1\source" "$sftpWindows\f5\unix.tar" "$sftp1\source\payload" 'f5-unix-windows'
+        Assert-WindowsRemoteTarEntry $windowsRemote "$windowsRoot\f5\unix.tar" 'payload/nested/value.txt'
+    }
+    Run-Case 'Alt+F5 Windows remote -> local archive' {
+        $target = Join-Path $local 'f5-windows.tar'
+        Invoke-Router pack "$sftpWindows\source" $target "$sftpWindows\source\payload" 'f5-windows-local'
+        if (-not (& "$env:SystemRoot\System32\tar.exe" -tf $target | Select-String -Quiet 'payload/nested/value.txt')) { throw 'local archive missing Windows payload' }
+    }
+    Run-Case 'Alt+F5 Windows remote -> Unix remote archive' {
+        Invoke-Router pack "$sftpWindows\source" "$sftp1\f5\windows.tar" "$sftpWindows\source\payload" 'f5-windows-unix'
+        Invoke-Remote $remote[0] "tar -tf $(Quote-Remote "$r1/f5/windows.tar") | grep -q payload/nested/value.txt"
+    }
+    Activate-RemoteSessions $tc "$tcSftp1\source" 1 "$tcSftp2\source" 2
     Run-Case 'Alt+F6 local archive -> remote' {
         Invoke-Router unpack $local "$sftp1\f6" (Join-Path $local 'f5-remote.tar') 'f6-local-remote'
         Assert-RemoteFile $remote[0] "$r1/f6/payload/nested/value.txt"
@@ -268,21 +372,45 @@ try {
     }
     Run-Case 'Alt+F6 remote archive -> local' {
         $target = Join-Path $local 'f6-remote-local'; New-Item -ItemType Directory -Path $target -Force | Out-Null
-        Invoke-Router unpack "$sftp1\f5" $target "$sftp1\f5\local.tar" 'f6-remote-local'
+        Invoke-Router unpack "$sftp1\f5" $target 'local.tar' 'f6-remote-local'
         Assert-File (Join-Path $target 'payload\nested\value.txt')
     }
     for ($index = 0; $index -lt $uncTargets.Count; $index++) {
         $uncTarget = $uncTargets[$index]
         Run-Case "Alt+F6 remote archive -> WSL UNC target #$($index + 1)" {
             $target = Join-Path $uncTarget 'f6'; New-Item -ItemType Directory -Path $target -Force | Out-Null
-            Invoke-Router unpack "$sftp1\f5" $target "$sftp1\f5\local.tar" ("f6-remote-unc-{0}" -f ($index + 1))
+            Invoke-Router unpack "$sftp1\f5" $target 'local.tar' ("f6-remote-unc-{0}" -f ($index + 1))
             Assert-File (Join-Path $target 'payload\nested\value.txt')
         }
     }
     Run-Case 'Alt+F6 remote #1 archive -> remote #2' {
-        Invoke-Router unpack "$sftp1\f5" "$sftp2\f6" "$sftp1\f5\local.tar" 'f6-cross'
+        Invoke-Router unpack "$sftp1\f5" "$sftp2\f6" 'local.tar' 'f6-cross'
         Assert-RemoteFile $remote[1] "$r2/f6/payload/nested/value.txt"
     }
+    Activate-RemoteSessions $tc "$tcSftpWindows\source" 3 "$tcSftp1\source" 1
+    Run-Case 'Alt+F6 local archive -> Windows remote' {
+        Invoke-Router unpack $local "$sftpWindows\f6" (Join-Path $local 'f5-remote.tar') 'f6-local-windows'
+        Assert-WindowsRemoteFile $windowsRemote "$windowsRoot\f6\payload\nested\value.txt"
+    }
+    Run-Case 'Alt+F6 WSL UNC archive -> Windows remote' {
+        $archive = Join-Path $uncTargets[0] 'f5-remote.tar'
+        Invoke-Router unpack (Split-Path -Parent $archive) "$sftpWindows\f6" $archive 'f6-unc-windows'
+        Assert-WindowsRemoteFile $windowsRemote "$windowsRoot\f6\payload\nested\value.txt"
+    }
+    Run-Case 'Alt+F6 Unix remote archive -> Windows remote' {
+        Invoke-Router unpack "$sftp1\f5" "$sftpWindows\f6" 'local.tar' 'f6-unix-windows'
+        Assert-WindowsRemoteFile $windowsRemote "$windowsRoot\f6\payload\nested\value.txt"
+    }
+    Run-Case 'Alt+F6 Windows remote archive -> local' {
+        $target = Join-Path $local 'f6-windows-local'; New-Item -ItemType Directory -Path $target -Force | Out-Null
+        Invoke-Router unpack "$sftpWindows\f5" $target 'local.tar' 'f6-windows-local'
+        Assert-File (Join-Path $target 'payload\nested\value.txt')
+    }
+    Run-Case 'Alt+F6 Windows remote archive -> Unix remote' {
+        Invoke-Router unpack "$sftpWindows\f5" "$sftp1\f6" 'local.tar' 'f6-windows-unix'
+        Assert-RemoteFile $remote[0] "$r1/f6/payload/nested/value.txt"
+    }
+    Activate-RemoteSessions $tc "$tcSftp1\source" 1 "$tcSftp2\source" 2
     Run-Case 'Alt+F7 local -> remote' {
         Invoke-Router copy $local "$sftp1\f7" (Join-Path $local 'payload') 'f7-local-remote'
         Assert-RemoteFile $remote[0] "$r1/f7/payload/nested/value.txt"
@@ -313,6 +441,31 @@ try {
         Invoke-Router copy "$sftp1\source" "$sftp2\f7" "$sftp1\source\payload" 'f7-cross'
         Assert-RemoteFile $remote[1] "$r2/f7/payload/nested/value.txt"
     }
+    Activate-RemoteSessions $tc "$tcSftpWindows\source" 3 "$tcSftp1\source" 1
+    Run-Case 'Alt+F7 local -> Windows remote' {
+        Invoke-Router copy $local "$sftpWindows\f7" (Join-Path $local 'payload') 'f7-local-windows'
+        Assert-WindowsRemoteFile $windowsRemote "$windowsRoot\f7\payload\nested\value.txt"
+    }
+    Run-Case 'Alt+F7 WSL UNC -> Windows remote' {
+        $source = Join-Path $uncTargets[0] 'f7-windows-source'; New-Item -ItemType Directory -Path (Join-Path $source 'payload\nested') -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $source 'payload\nested\value.txt'), 'archive-smoke')
+        Invoke-Router copy $source "$sftpWindows\f7" (Join-Path $source 'payload') 'f7-unc-windows'
+        Assert-WindowsRemoteFile $windowsRemote "$windowsRoot\f7\payload\nested\value.txt"
+    }
+    Run-Case 'Alt+F7 Unix remote -> Windows remote' {
+        Invoke-Router copy "$sftp1\source" "$sftpWindows\f7" "$sftp1\source\payload" 'f7-unix-windows'
+        Assert-WindowsRemoteFile $windowsRemote "$windowsRoot\f7\payload\nested\value.txt"
+    }
+    Run-Case 'Alt+F7 Windows remote -> local' {
+        $target = Join-Path $local 'f7-windows-local'; New-Item -ItemType Directory -Path $target -Force | Out-Null
+        Invoke-Router copy "$sftpWindows\source" $target "$sftpWindows\source\payload" 'f7-windows-local'
+        Assert-File (Join-Path $target 'payload\nested\value.txt')
+    }
+    Run-Case 'Alt+F7 Windows remote -> Unix remote' {
+        Invoke-Router copy "$sftpWindows\source" "$sftp1\f7" "$sftpWindows\source\payload" 'f7-windows-unix'
+        Assert-RemoteFile $remote[0] "$r1/f7/payload/nested/value.txt"
+    }
+    Activate-RemoteSessions $tc "$tcSftp1\source" 1 "$tcSftp2\source" 2
     Run-Case 'Alt+F8 local -> remote deletes source after success' {
         $source = Join-Path $local 'f8-local'; New-Item -ItemType Directory -Path $source -Force | Out-Null
         Copy-Item -LiteralPath (Join-Path $local 'payload') -Destination $source -Recurse
@@ -351,13 +504,63 @@ try {
         Assert-RouterFails move "$sftp1\failed" "$sftp2\missing-parent\target" "$sftp1\failed\payload" 'f8-failed-target'
         Assert-RemoteFile $remote[0] "$r1/failed/payload/nested/value.txt"
     }
+    Activate-RemoteSessions $tc "$tcSftpWindows\source" 3 "$tcSftp1\source" 1
+    Run-Case 'Alt+F8 local -> Windows remote deletes source after success' {
+        $source = Join-Path $local 'f8-windows-local'; New-Item -ItemType Directory -Path (Join-Path $source 'payload\nested') -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $source 'payload\nested\value.txt'), 'archive-smoke')
+        Invoke-Router move $source "$sftpWindows\f8" (Join-Path $source 'payload') 'f8-local-windows'
+        Assert-WindowsRemoteFile $windowsRemote "$windowsRoot\f8\payload\nested\value.txt"
+        if (Test-Path -LiteralPath (Join-Path $source 'payload')) { throw 'local source was not deleted' }
+    }
+    Run-Case 'Alt+F8 WSL UNC -> Windows remote deletes source after success' {
+        $source = Join-Path $uncTargets[0] 'f8-windows-source'; New-Item -ItemType Directory -Path (Join-Path $source 'payload\nested') -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $source 'payload\nested\value.txt'), 'archive-smoke')
+        Invoke-Router move $source "$sftpWindows\f8" (Join-Path $source 'payload') 'f8-unc-windows'
+        Assert-WindowsRemoteFile $windowsRemote "$windowsRoot\f8\payload\nested\value.txt"
+        if (Test-Path -LiteralPath (Join-Path $source 'payload')) { throw 'UNC source was not deleted' }
+    }
+    Run-Case 'Alt+F8 Unix remote -> Windows remote deletes source after success' {
+        Invoke-Remote $remote[0] "mkdir -p $(Quote-Remote "$r1/move-windows/payload/nested"); printf archive-smoke > $(Quote-Remote "$r1/move-windows/payload/nested/value.txt")"
+        Invoke-Router move "$sftp1\move-windows" "$sftpWindows\f8" "$sftp1\move-windows\payload" 'f8-unix-windows'
+        Assert-WindowsRemoteFile $windowsRemote "$windowsRoot\f8\payload\nested\value.txt"
+        if (Test-RemotePath $remote[0] "$r1/move-windows/payload") { throw 'Unix remote source was not deleted' }
+    }
+    Run-Case 'Alt+F8 Windows remote -> local deletes source after success' {
+        Invoke-Router move "$sftpWindows\source" (Join-Path $local 'f8-windows-local') "$sftpWindows\source\payload" 'f8-windows-local'
+        Assert-File (Join-Path $local 'f8-windows-local\payload\nested\value.txt')
+        if (Test-WindowsRemotePath $windowsRemote "$windowsRoot\source\payload") { throw 'Windows remote source was not deleted' }
+    }
+    Run-Case 'Alt+F8 Windows remote -> Unix remote deletes source after success' {
+        Invoke-WindowsRemote $windowsRemote "New-Item -ItemType Directory -Path '$windowsRootLiteral\move-unix\payload\nested' -Force | Out-Null; Set-Content -LiteralPath '$windowsRootLiteral\move-unix\payload\nested\value.txt' -Value 'archive-smoke' -NoNewline" | Out-Null
+        Invoke-Router move "$sftpWindows\move-unix" "$sftp1\f8" "$sftpWindows\move-unix\payload" 'f8-windows-unix'
+        Assert-RemoteFile $remote[0] "$r1/f8/payload/nested/value.txt"
+        if (Test-WindowsRemotePath $windowsRemote "$windowsRoot\move-unix\payload") { throw 'Windows remote source was not deleted' }
+    }
+    Run-Case 'Alt+F8 failed Windows target preserves Unix source' {
+        Invoke-Remote $remote[0] "mkdir -p $(Quote-Remote "$r1/failed-windows/payload/nested"); printf archive-smoke > $(Quote-Remote "$r1/failed-windows/payload/nested/value.txt")"
+        Assert-RouterFails move "$sftp1\failed-windows" "$sftpWindows\missing-parent\target" "$sftp1\failed-windows\payload" 'f8-failed-windows-target'
+        Assert-RemoteFile $remote[0] "$r1/failed-windows/payload/nested/value.txt"
+    }
+    Activate-RemoteSessions $tc "$tcSftp1\source" 1 "$tcSftp2\source" 2
     Run-Case 'Alt+F9 remote deletion' {
         Invoke-Remote $remote[0] "mkdir -p $(Quote-Remote "$r1/delete/tree"); printf archive-smoke > $(Quote-Remote "$r1/delete/tree/value.txt")"
         Invoke-Router delete "$sftp1\delete" '' "$sftp1\delete\tree" 'f9-delete'
         if (Test-RemotePath $remote[0] "$r1/delete/tree") { throw 'remote tree was not deleted' }
     }
+    Activate-RemoteSessions $tc "$tcSftpWindows\source" 3 "$tcSftp1\source" 1
+    Run-Case 'Alt+F9 Windows remote deletion' {
+        Invoke-WindowsRemote $windowsRemote "New-Item -ItemType Directory -Path '$windowsRootLiteral\delete\tree' -Force | Out-Null; Set-Content -LiteralPath '$windowsRootLiteral\delete\tree\value.txt' -Value 'archive-smoke' -NoNewline" | Out-Null
+        Invoke-Router delete "$sftpWindows\delete" '' "$sftpWindows\delete\tree" 'f9-windows-delete'
+        if (Test-WindowsRemotePath $windowsRemote "$windowsRoot\delete\tree") { throw 'Windows remote tree was not deleted' }
+    }
 } finally {
     if (Get-Variable remote -Scope Script -ErrorAction SilentlyContinue) { foreach ($session in $remote) { try { Invoke-Remote $session "rm -rf /tmp/sftpplug-archive-smoke-$script:RunId" } catch {} } }
+    if (Get-Variable windowsRemote -Scope Script -ErrorAction SilentlyContinue -ValueOnly) {
+        try {
+            $cleanupRoot = $windowsRoot.Replace("'", "''")
+            Invoke-WindowsRemote $windowsRemote "Remove-Item -LiteralPath '$cleanupRoot' -Recurse -Force -ErrorAction SilentlyContinue"
+        } catch {}
+    }
     if (-not $KeepArtifacts) {
         Remove-UncArtifacts $WslDistros $script:RunId
         Remove-Item -LiteralPath $script:WorkRoot -Recurse -Force -ErrorAction SilentlyContinue

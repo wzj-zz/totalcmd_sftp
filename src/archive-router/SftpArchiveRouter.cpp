@@ -1835,6 +1835,10 @@ int Copy(const std::wstring& sourcePath, const std::wstring& targetPath, const s
         ShowError(L"The target directory is empty.");
         return 2;
     }
+    if (targetSftp && !IsRemoteDirectory(target)) {
+        ShowError(L"The remote target directory does not exist or is unavailable.");
+        return 2;
+    }
     const std::string itemText = JoinArchiveItems(items);
     if (!sourceSftp)
         return StreamLocalArchiveToSftp(sourcePath, target, listPath, kArchiveExtract);
@@ -1861,6 +1865,10 @@ int Move(const std::wstring& sourcePath, const std::wstring& targetPath, const s
         return kOperationCanceled;
     if (target.empty()) {
         ShowError(L"The target directory is empty.");
+        return 2;
+    }
+    if (targetSftp && !IsRemoteDirectory(target)) {
+        ShowError(L"The remote target directory does not exist or is unavailable.");
         return 2;
     }
     const std::string itemText = JoinArchiveItems(items);
@@ -1901,7 +1909,7 @@ int Delete(const std::wstring& sourcePath, const std::wstring& listPath, bool in
     return DeleteSftpSource(sourcePath, JoinArchiveItems(items)) ? 0 : 1;
 }
 
-int Prewarm(const std::wstring& sourcePath)
+int Prewarm(const std::wstring& sourcePath, bool interactive = true)
 {
     if (!IsSftpVirtualPath(sourcePath)) {
         ShowError(L"Alt+F11 directory prewarming is available only in an SFTP panel.");
@@ -1919,8 +1927,10 @@ int Prewarm(const std::wstring& sourcePath)
         ShowError(error.empty() ? L"Could not prewarm the remote directory tree." : FromUtf8(error));
         return 1;
     }
-    ShowRouterMessage(L"Remote directory metadata is ready for Total Commander's native sync and compare operations.",
-                      L"SFTP Directory Prewarm", MB_OK | MB_ICONINFORMATION);
+    if (interactive) {
+        ShowRouterMessage(L"Remote directory metadata is ready for Total Commander's native sync and compare operations.",
+                          L"SFTP Directory Prewarm", MB_OK | MB_ICONINFORMATION);
+    }
     return 0;
 }
 
@@ -1944,6 +1954,15 @@ int Unpack(const std::wstring& sourcePath, const std::wstring& targetPath, const
             return 2;
         }
         if (IsSftpVirtualPath(sourcePath)) {
+            // TC's selection list contains the panel-relative archive name,
+            // while the archive pipe requires a complete SFTP virtual path.
+            if (!IsSftpVirtualPath(selectedArchive)) {
+                if (selectedArchive.starts_with(L"..") || selectedArchive.find_first_of(L"\r\n") != std::wstring::npos) {
+                    ShowError(L"The selected archive path is invalid.");
+                    return 2;
+                }
+                selectedArchive = JoinPath(sourcePath, selectedArchive);
+            }
             if (IsSftpVirtualPath(target))
                 return ExtractSftpArchive(selectedArchive, L"", &target);
             return ExtractSftpArchive(selectedArchive, target, nullptr);
@@ -2031,6 +2050,22 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         const std::wstring errorPath(argc == 4 ? argv[3] : L"");
         LocalFree(argv);
         return SelfTestSession(path, errorPath);
+    }
+    if (operation == L"selftest-prewarm") {
+        if (argc != 3 && argc != 4) {
+            LocalFree(argv);
+            WriteStdErrUtf8(L"Usage: SftpArchiveRouter.exe selftest-prewarm <sftp-directory> [error-file]");
+            return 2;
+        }
+        const std::wstring path(argv[2]);
+        const std::wstring errorPath(argc == 4 ? argv[3] : L"");
+        LocalFree(argv);
+        g_nonInteractive = true;
+        g_nonInteractiveError.clear();
+        const int result = Prewarm(path, false);
+        if (result != 0 && !errorPath.empty())
+            WriteUtf8TextFile(errorPath, g_nonInteractiveError.empty() ? L"Could not prewarm the remote directory tree." : g_nonInteractiveError);
+        return result;
     }
     if (argc == 2) {
         LocalFree(argv);
