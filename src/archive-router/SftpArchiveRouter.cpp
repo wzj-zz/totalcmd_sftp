@@ -46,6 +46,10 @@ HANDLE OpenArchivePipe();
 bool StartArchiveRequest(HANDLE pipe, DWORD operation, std::wstring_view sourcePath,
                          std::wstring_view targetPath, std::string_view items,
                          std::string& error);
+void WriteStdErrUtf8(std::wstring_view text);
+
+bool g_nonInteractive = false;
+std::wstring g_nonInteractiveError;
 
 HWND FindTotalCommanderWindow()
 {
@@ -73,6 +77,11 @@ bool ShowErrorInTotalCommander(std::wstring_view message)
 
 void ShowError(std::wstring_view message)
 {
+    if (g_nonInteractive) {
+        g_nonInteractiveError = message;
+        WriteStdErrUtf8(message);
+        return;
+    }
     if (!ShowErrorInTotalCommander(message))
         ShowRouterMessage(message, L"SFTP Archive Router", MB_OK | MB_ICONERROR);
 }
@@ -274,12 +283,6 @@ std::wstring QuoteWindowsArgument(std::wstring_view argument)
     return quoted;
 }
 
-bool IsUncPath(std::wstring_view path)
-{
-    return path.size() >= 2 && ((path[0] == L'\\' && path[1] == L'\\') ||
-                                (path[0] == L'/' && path[1] == L'/'));
-}
-
 struct LocalTarInvocation {
     std::wstring executable;
     std::wstring command;
@@ -288,24 +291,10 @@ struct LocalTarInvocation {
 LocalTarInvocation CreateLocalTarInvocation(const std::wstring& tarPath, const std::wstring& directory,
                                              std::wstring_view beforeDirectory, std::wstring_view afterDirectory)
 {
-    if (!IsUncPath(directory)) {
-        return { tarPath, QuoteWindowsArgument(tarPath) + std::wstring(beforeDirectory) +
-                 QuoteWindowsArgument(directory) + std::wstring(afterDirectory) };
-    }
-
-    std::array<wchar_t, MAX_PATH> systemDirectory{};
-    const UINT length = GetSystemDirectoryW(systemDirectory.data(), static_cast<UINT>(systemDirectory.size()));
-    if (length == 0 || length >= systemDirectory.size())
-        return {};
-    const std::wstring commandProcessor = std::wstring(systemDirectory.data(), length) + L"\\cmd.exe";
-    // pushd gives every UNC provider a process-local drive mapping, including
-    // WSL and SMB shares. The mapping disappears when cmd.exe exits.
-    const std::wstring payload = L"pushd " + QuoteWindowsArgument(directory) + L" && " +
-        QuoteWindowsArgument(tarPath) + std::wstring(beforeDirectory) + L"." +
-        std::wstring(afterDirectory) + L" && popd";
-    // cmd.exe needs its own outer command quotes. Do not apply CreateProcess
-    // backslash escaping to payload because cmd.exe does not interpret \".
-    return { commandProcessor, QuoteWindowsArgument(commandProcessor) + L" /d /v:off /s /c \"" + payload + L"\"" };
+    // Windows tar.exe accepts UNC paths directly. Do not route WSL UNC paths
+    // through cmd.exe/pushd: cmd.exe rejects these providers before tar starts.
+    return { tarPath, QuoteWindowsArgument(tarPath) + std::wstring(beforeDirectory) +
+             QuoteWindowsArgument(directory) + std::wstring(afterDirectory) };
 }
 
 std::wstring GetExecutableDirectory();
@@ -459,6 +448,30 @@ std::wstring FromUtf8(std::string_view text)
     return out;
 }
 
+bool WriteUtf8TextFile(const std::wstring& path, std::wstring_view text)
+{
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+        return false;
+    const std::string utf8 = ToUtf8(text);
+    DWORD written = 0;
+    const bool ok = utf8.empty() ||
+        (WriteFile(file, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr) && written == utf8.size());
+    CloseHandle(file);
+    return ok;
+}
+
+void WriteStdErrUtf8(std::wstring_view text)
+{
+    HANDLE errorHandle = GetStdHandle(STD_ERROR_HANDLE);
+    if (errorHandle == INVALID_HANDLE_VALUE || !errorHandle)
+        return;
+    std::string utf8 = ToUtf8(text);
+    utf8 += "\r\n";
+    DWORD written = 0;
+    WriteFile(errorHandle, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
+}
+
 bool ReadTextLines(const std::wstring& path, std::vector<std::wstring>& lines)
 {
     HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -521,7 +534,12 @@ bool ReadRelativeTarNames(const std::wstring& sourcePath, const std::wstring& se
             const std::filesystem::path relative = std::filesystem::relative(std::filesystem::path(item), root, error);
             if (error || relative.empty() || relative.native().starts_with(L".."))
                 return false;
-            const std::wstring name = relative.generic_wstring();
+            std::wstring name = relative.generic_wstring();
+            // TC's %L can preserve a selected directory's trailing separator.
+            // Windows tar.exe accepts the directory name but rejects name/ on a
+            // WSL UNC source root, producing an empty archive stream.
+            while (!name.empty() && (name.back() == L'/' || name.back() == L'\\'))
+                name.pop_back();
             if (name.empty() || name.find_first_of(L"\r\n\"") != std::wstring::npos)
                 return false;
             relativeNames.push_back(name);
@@ -589,7 +607,19 @@ HANDLE OpenArchivePipe()
     if (!tcWindow || !GetWindowThreadProcessId(tcWindow, &tcPid))
         return INVALID_HANDLE_VALUE;
     const std::wstring pipeName = L"\\\\.\\pipe\\SftpArchive." + std::to_wstring(tcPid);
-    return CreateFileW(pipeName.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+    // The WFX listener recreates its single pipe instance after every request.
+    // A follow-up move cleanup can otherwise race that recreation after a
+    // successful remote-to-remote copy.
+    for (int attempt = 0; attempt != 20; ++attempt) {
+        HANDLE pipe = CreateFileW(pipeName.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (pipe != INVALID_HANDLE_VALUE)
+            return pipe;
+        const DWORD error = GetLastError();
+        if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PIPE_BUSY)
+            break;
+        Sleep(25);
+    }
+    return INVALID_HANDLE_VALUE;
 }
 
 bool StartArchiveRequest(HANDLE pipe, DWORD operation, std::wstring_view sourcePath,
@@ -926,6 +956,21 @@ bool CopyExtractedContents(const std::wstring& source, const std::wstring& targe
     return true;
 }
 
+bool ExtractArchiveToLocalDirectory(const std::wstring& archive, const std::wstring& targetPath, std::wstring& error)
+{
+    TemporaryDirectory temporary;
+    if (!temporary) {
+        error = L"Could not create the temporary archive directory.";
+        return false;
+    }
+    const std::wstring extracted = JoinPath(temporary.path(), L"extracted");
+    if (!CreateDirectoryW(extracted.c_str(), nullptr)) {
+        error = L"Could not create the temporary extraction directory.";
+        return false;
+    }
+    return ExtractWith7Zip(archive, extracted, error) && CopyExtractedContents(extracted, targetPath, error);
+}
+
 int StreamLocalArchiveToSftp(const std::wstring& sourcePath, const std::wstring& targetPath,
                               const std::wstring& listPath, DWORD operation = kArchivePut,
                               const std::wstring* archiveTarget = nullptr)
@@ -1032,7 +1077,11 @@ int StreamLocalArchiveToSftp(const std::wstring& sourcePath, const std::wstring&
         return 1;
     }
     if (tarExit != 0) {
-        ShowError(tarError.empty() ? L"Windows tar.exe could not create the archive stream." : FromUtf8(tarError));
+        std::wstring detail = tarError.empty() ? L"Windows tar.exe could not create the archive stream." : FromUtf8(tarError);
+        detail += L"\n\nSource directory: " + sourceRoot;
+        if (!tarNames.empty())
+            detail += L"\nSelected item: " + tarNames.front();
+        ShowError(detail);
         return 1;
     }
     return 0;
@@ -1387,6 +1436,11 @@ bool IsRemoteDirectory(const std::wstring& path)
 
 int ExtractLocalArchive(const std::wstring& archive, const std::wstring& targetPath, const std::wstring* sftpTarget)
 {
+    if (!sftpTarget) {
+        std::wstring error;
+        return ExtractArchiveToLocalDirectory(archive, targetPath, error) ? 0 : (ShowError(error), 1);
+    }
+
     TemporaryDirectory temporary;
     if (!temporary) {
         ShowError(L"Could not create the temporary archive directory.");
@@ -1402,9 +1456,6 @@ int ExtractLocalArchive(const std::wstring& archive, const std::wstring& targetP
         ShowError(error);
         return 1;
     }
-    if (!sftpTarget)
-        return CopyExtractedContents(extracted, targetPath, error) ? 0 : (ShowError(error), 1);
-
     const std::wstring listPath = JoinPath(temporary.path(), L"items.txt");
     if (!WriteTopLevelList(extracted, listPath)) {
         ShowError(L"Could not prepare the extracted files for transfer.");
@@ -1428,6 +1479,38 @@ int ExtractSftpArchive(const std::wstring& sourceArchive, const std::wstring& ta
     if (download != 0)
         return download;
     return ExtractLocalArchive(localArchive, targetPath, sftpTarget);
+}
+
+int SelfTestUnpackLocal(const std::wstring& archive, const std::wstring& targetPath, const std::wstring& errorPath)
+{
+    std::wstring error;
+    if (ExtractArchiveToLocalDirectory(archive, targetPath, error))
+        return 0;
+    if (!errorPath.empty())
+        WriteUtf8TextFile(errorPath, error);
+    WriteStdErrUtf8(error);
+    return 1;
+}
+
+int SelfTestSession(const std::wstring& path, const std::wstring& errorPath)
+{
+    g_nonInteractive = true;
+    g_nonInteractiveError.clear();
+    HANDLE pipe = OpenArchivePipe();
+    if (pipe == INVALID_HANDLE_VALUE) {
+        g_nonInteractiveError = L"The installed SFTP plugin does not provide the archive service.";
+    } else {
+        std::string error;
+        if (!StartArchiveRequest(pipe, kArchiveIsDirectory, path, L"", "", error))
+            g_nonInteractiveError = error.empty() ? L"The SFTP session is not ready." : FromUtf8(error);
+        CloseHandle(pipe);
+    }
+    if (g_nonInteractiveError.empty())
+        return 0;
+    if (!errorPath.empty())
+        WriteUtf8TextFile(errorPath, g_nonInteractiveError);
+    WriteStdErrUtf8(g_nonInteractiveError);
+    return 1;
 }
 
 std::wstring GetExecutableDirectory()
@@ -1500,7 +1583,8 @@ bool InitializePortableRouter()
     return true;
 }
 
-int Pack(const std::wstring& sourcePath, const std::wstring& targetPath, const std::wstring& listPath)
+int Pack(const std::wstring& sourcePath, const std::wstring& targetPath, const std::wstring& listPath,
+         bool interactive = true)
 {
     const bool sourceSftp = IsSftpVirtualPath(sourcePath);
     const bool targetSftp = IsSftpVirtualPath(targetPath);
@@ -1512,9 +1596,13 @@ int Pack(const std::wstring& sourcePath, const std::wstring& targetPath, const s
         ShowError(L"Could not prepare the selected files for archive streaming.");
         return 2;
     }
-    std::wstring archiveTarget = JoinPath(TargetForPrompt(targetPath), ArchiveName(items));
-    if (!PromptForTarget(L"Archive file name:", archiveTarget))
+    std::wstring archiveTarget = interactive ? JoinPath(TargetForPrompt(targetPath), ArchiveName(items)) : targetPath;
+    if (interactive && !PromptForTarget(L"Archive file name:", archiveTarget))
         return kOperationCanceled;
+    if (archiveTarget.empty()) {
+        ShowError(L"The archive target path is empty.");
+        return 2;
+    }
     const std::string itemText = JoinArchiveItems(items);
     if (!sourceSftp)
         return StreamLocalArchiveToSftp(sourcePath, targetPath, listPath, kArchivePut, &archiveTarget);
@@ -1523,7 +1611,8 @@ int Pack(const std::wstring& sourcePath, const std::wstring& targetPath, const s
     return StreamSftpPackToLocalFile(sourcePath, itemText, archiveTarget);
 }
 
-int Copy(const std::wstring& sourcePath, const std::wstring& targetPath, const std::wstring& listPath)
+int Copy(const std::wstring& sourcePath, const std::wstring& targetPath, const std::wstring& listPath,
+         bool interactive = true)
 {
     const bool sourceSftp = IsSftpVirtualPath(sourcePath);
     const bool targetSftp = IsSftpVirtualPath(targetPath);
@@ -1536,9 +1625,13 @@ int Copy(const std::wstring& sourcePath, const std::wstring& targetPath, const s
         return 2;
     }
 
-    std::wstring target = TargetForPrompt(targetPath);
-    if (!PromptForTarget(L"Target directory:", target))
+    std::wstring target = interactive ? TargetForPrompt(targetPath) : targetPath;
+    if (interactive && !PromptForTarget(L"Target directory:", target))
         return kOperationCanceled;
+    if (target.empty()) {
+        ShowError(L"The target directory is empty.");
+        return 2;
+    }
     const std::string itemText = JoinArchiveItems(items);
     if (!sourceSftp)
         return StreamLocalArchiveToSftp(sourcePath, target, listPath, kArchiveExtract);
@@ -1547,7 +1640,8 @@ int Copy(const std::wstring& sourcePath, const std::wstring& targetPath, const s
     return StreamSftpArchiveToSftp(sourcePath, target, kArchivePackExtractRemote, itemText);
 }
 
-int Move(const std::wstring& sourcePath, const std::wstring& targetPath, const std::wstring& listPath)
+int Move(const std::wstring& sourcePath, const std::wstring& targetPath, const std::wstring& listPath,
+         bool interactive = true)
 {
     const bool sourceSftp = IsSftpVirtualPath(sourcePath);
     const bool targetSftp = IsSftpVirtualPath(targetPath);
@@ -1559,9 +1653,13 @@ int Move(const std::wstring& sourcePath, const std::wstring& targetPath, const s
         ShowError(L"Could not prepare the selected files for accelerated move.");
         return 2;
     }
-    std::wstring target = TargetForPrompt(targetPath);
-    if (!PromptForTarget(L"Target directory:", target))
+    std::wstring target = interactive ? TargetForPrompt(targetPath) : targetPath;
+    if (interactive && !PromptForTarget(L"Target directory:", target))
         return kOperationCanceled;
+    if (target.empty()) {
+        ShowError(L"The target directory is empty.");
+        return 2;
+    }
     const std::string itemText = JoinArchiveItems(items);
     int copied = 1;
     if (!sourceSftp)
@@ -1579,7 +1677,7 @@ int Move(const std::wstring& sourcePath, const std::wstring& targetPath, const s
     return DeleteLocalSource(sourcePath, items) ? 0 : 1;
 }
 
-int Delete(const std::wstring& sourcePath, const std::wstring& listPath)
+int Delete(const std::wstring& sourcePath, const std::wstring& listPath, bool interactive = true)
 {
     if (!IsSftpVirtualPath(sourcePath))
         return RunNativeTcCommand(L"cm_Delete") ? 0 : 1;
@@ -1589,12 +1687,14 @@ int Delete(const std::wstring& sourcePath, const std::wstring& listPath)
         ShowError(L"Could not prepare the selected remote files for deletion.");
         return 2;
     }
-    const std::wstring message = items.size() == 1
-        ? L"Delete the selected remote item permanently?\n\n" + items.front()
-        : L"Delete " + std::to_wstring(items.size()) + L" selected remote items permanently?";
-    if (ShowRouterMessage(message, L"SFTP Archive Router",
-                          MB_YESNO | MB_ICONWARNING) != IDYES)
-        return kOperationCanceled;
+    if (interactive) {
+        const std::wstring message = items.size() == 1
+            ? L"Delete the selected remote item permanently?\n\n" + items.front()
+            : L"Delete " + std::to_wstring(items.size()) + L" selected remote items permanently?";
+        if (ShowRouterMessage(message, L"SFTP Archive Router",
+                              MB_YESNO | MB_ICONWARNING) != IDYES)
+            return kOperationCanceled;
+    }
     return DeleteSftpSource(sourcePath, JoinArchiveItems(items)) ? 0 : 1;
 }
 
@@ -1621,7 +1721,8 @@ int Prewarm(const std::wstring& sourcePath)
     return 0;
 }
 
-int Unpack(const std::wstring& sourcePath, const std::wstring& targetPath, const std::wstring& listPath)
+int Unpack(const std::wstring& sourcePath, const std::wstring& targetPath, const std::wstring& listPath,
+           bool interactive = true)
 {
     std::wstring selectedArchive;
     if (!ReadSingleSelectedPath(listPath, selectedArchive)) {
@@ -1632,9 +1733,13 @@ int Unpack(const std::wstring& sourcePath, const std::wstring& targetPath, const
         return 2;
     }
     if (IsSftpVirtualPath(sourcePath) || IsSftpVirtualPath(targetPath)) {
-        std::wstring target = TargetForPrompt(targetPath);
-        if (!PromptForTarget(L"Target directory:", target))
+        std::wstring target = interactive ? TargetForPrompt(targetPath) : targetPath;
+        if (interactive && !PromptForTarget(L"Target directory:", target))
             return kOperationCanceled;
+        if (target.empty()) {
+            ShowError(L"The target directory is empty.");
+            return 2;
+        }
         if (IsSftpVirtualPath(sourcePath)) {
             if (IsSftpVirtualPath(target))
                 return ExtractSftpArchive(selectedArchive, L"", &target);
@@ -1645,19 +1750,85 @@ int Unpack(const std::wstring& sourcePath, const std::wstring& targetPath, const
     return RunNativeTcCommand(L"cm_UnpackFiles") ? 0 : 1;
 }
 
+int SelfTestOperation(const std::wstring& operation, const std::wstring& sourcePath,
+                      const std::wstring& targetPath, const std::wstring& listPath,
+                      const std::wstring& errorPath)
+{
+    g_nonInteractive = true;
+    g_nonInteractiveError.clear();
+    int result = 2;
+    if (operation == L"pack")
+        result = FinishSftpOperation(sourcePath, targetPath, L"Compress", L"Alt+F5", Pack(sourcePath, targetPath, listPath, false));
+    else if (operation == L"unpack")
+        result = FinishSftpOperation(sourcePath, targetPath, L"Decompress", L"Alt+F6", Unpack(sourcePath, targetPath, listPath, false));
+    else if (operation == L"copy")
+        result = FinishSftpOperation(sourcePath, targetPath, L"Copy", L"Alt+F7", Copy(sourcePath, targetPath, listPath, false));
+    else if (operation == L"move")
+        result = FinishSftpOperation(sourcePath, targetPath, L"Move", L"Alt+F8", Move(sourcePath, targetPath, listPath, false));
+    else if (operation == L"delete")
+        result = FinishSftpOperation(sourcePath, targetPath, L"Delete", L"Alt+F9", Delete(sourcePath, listPath, false));
+    else
+        ShowError(L"Unsupported self-test archive operation.");
+
+    if (result != 0) {
+        if (g_nonInteractiveError.empty())
+            g_nonInteractiveError = L"The archive operation failed with exit code " + std::to_wstring(result) + L".";
+        if (!errorPath.empty())
+            WriteUtf8TextFile(errorPath, g_nonInteractiveError);
+    }
+    return result;
+}
+
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 {
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (!argv || (argc != 2 && argc != 3 && argc != 4 && argc != 5)) {
+    if (!argv || argc < 2) {
         ShowError(L"Usage: SftpArchiveRouter.exe init\n       SftpArchiveRouter.exe prewarm <source-path>\n       SftpArchiveRouter.exe localdiff <source-path> <target-path>\n       SftpArchiveRouter.exe copy|move|delete|pack|unpack <source-path> <target-path> <selected-list>");
         if (argv) LocalFree(argv);
         return 2;
     }
 
     const std::wstring operation(argv[1]);
+    if (operation == L"selftest-unpack-local") {
+        if (argc != 4 && argc != 5) {
+            LocalFree(argv);
+            WriteStdErrUtf8(L"Usage: SftpArchiveRouter.exe selftest-unpack-local <archive> <target-directory> [error-file]");
+            return 2;
+        }
+        const std::wstring archive(argv[2]);
+        const std::wstring targetPath(argv[3]);
+        const std::wstring errorPath(argc == 5 ? argv[4] : L"");
+        LocalFree(argv);
+        return SelfTestUnpackLocal(archive, targetPath, errorPath);
+    }
+    if (operation == L"selftest-operation") {
+        if (argc != 6 && argc != 7) {
+            LocalFree(argv);
+            WriteStdErrUtf8(L"Usage: SftpArchiveRouter.exe selftest-operation <pack|unpack|copy|move|delete> <source-path> <target-path> <selected-list> [error-file]");
+            return 2;
+        }
+        const std::wstring testOperation(argv[2]);
+        const std::wstring sourcePath(argv[3]);
+        const std::wstring targetPath(argv[4]);
+        const std::wstring listPath(argv[5]);
+        const std::wstring errorPath(argc == 7 ? argv[6] : L"");
+        LocalFree(argv);
+        return SelfTestOperation(testOperation, sourcePath, targetPath, listPath, errorPath);
+    }
+    if (operation == L"selftest-session") {
+        if (argc != 3 && argc != 4) {
+            LocalFree(argv);
+            WriteStdErrUtf8(L"Usage: SftpArchiveRouter.exe selftest-session <sftp-directory> [error-file]");
+            return 2;
+        }
+        const std::wstring path(argv[2]);
+        const std::wstring errorPath(argc == 4 ? argv[3] : L"");
+        LocalFree(argv);
+        return SelfTestSession(path, errorPath);
+    }
     if (argc == 2) {
         LocalFree(argv);
         if (operation == L"init")
