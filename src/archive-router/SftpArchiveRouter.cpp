@@ -6,6 +6,7 @@
 #include <array>
 #include <atomic>
 #include <algorithm>
+#include <cwctype>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -342,6 +343,207 @@ bool IsSftpVirtualPath(std::wstring_view path)
         ? path.substr(firstSegment)
         : path.substr(firstSegment, separator - firstSegment);
     return _wcsicmp(std::wstring(root).c_str(), L"SFTP") == 0;
+}
+
+std::wstring NormalizePanelPath(std::wstring path)
+{
+    while (path.size() >= 2 && (path.ends_with(L"\\.") || path.ends_with(L"/."))) {
+        if (path.size() == 4 && path[1] == L':' &&
+            (path[2] == L'\\' || path[2] == L'/') && path[3] == L'.')
+            return path.substr(0, 3);
+        path.resize(path.size() - 2);
+    }
+    return path;
+}
+
+bool ParseSftpPanelPath(const std::wstring& path, std::wstring& session, std::wstring& remotePath)
+{
+    if (!IsSftpVirtualPath(path))
+        return false;
+    const size_t root = path.find_first_not_of(L"\\/");
+    const size_t rootEnd = path.find_first_of(L"\\/", root);
+    const size_t sessionStart = rootEnd == std::wstring::npos ? std::wstring::npos
+        : path.find_first_not_of(L"\\/", rootEnd);
+    if (sessionStart == std::wstring::npos)
+        return false;
+    const size_t sessionEnd = path.find_first_of(L"\\/", sessionStart);
+    session.assign(path.substr(sessionStart, sessionEnd == std::wstring::npos ? std::wstring::npos : sessionEnd - sessionStart));
+    remotePath = sessionEnd == std::wstring::npos ? L"/" : path.substr(sessionEnd);
+    std::replace(remotePath.begin(), remotePath.end(), L'\\', L'/');
+    remotePath = NormalizePanelPath(remotePath);
+    if (remotePath.empty())
+        remotePath = L"/";
+    return !session.empty();
+}
+
+bool ParseWslUncPath(const std::wstring& path, std::wstring& distribution, std::wstring& linuxPath)
+{
+    const size_t serverStart = path.find_first_not_of(L"\\/");
+    if (serverStart == std::wstring::npos)
+        return false;
+    const size_t serverEnd = path.find_first_of(L"\\/", serverStart);
+    const std::wstring server(path.substr(serverStart, serverEnd == std::wstring::npos ? std::wstring::npos : serverEnd - serverStart));
+    if (_wcsicmp(server.c_str(), L"wsl.localhost") != 0 && _wcsicmp(server.c_str(), L"wsl$") != 0)
+        return false;
+    const size_t distributionStart = serverEnd == std::wstring::npos ? std::wstring::npos
+        : path.find_first_not_of(L"\\/", serverEnd);
+    if (distributionStart == std::wstring::npos)
+        return false;
+    const size_t distributionEnd = path.find_first_of(L"\\/", distributionStart);
+    distribution.assign(path.substr(distributionStart, distributionEnd == std::wstring::npos
+        ? std::wstring::npos : distributionEnd - distributionStart));
+    linuxPath = distributionEnd == std::wstring::npos ? L"/" : path.substr(distributionEnd);
+    std::replace(linuxPath.begin(), linuxPath.end(), L'\\', L'/');
+    linuxPath = NormalizePanelPath(linuxPath);
+    if (linuxPath.empty())
+        linuxPath = L"/";
+    return !distribution.empty();
+}
+
+std::wstring GetSystemExecutable(const wchar_t* relativePath)
+{
+    std::array<wchar_t, 32768> systemDirectory{};
+    const UINT length = GetSystemDirectoryW(systemDirectory.data(), static_cast<UINT>(systemDirectory.size()));
+    if (length == 0 || length >= systemDirectory.size())
+        return {};
+    const std::filesystem::path executable = std::filesystem::path(systemDirectory.data()) / relativePath;
+    return GetFileAttributesW(executable.c_str()) == INVALID_FILE_ATTRIBUTES ? std::wstring{} : executable.wstring();
+}
+
+bool LaunchTerminal(const std::wstring& executable, std::wstring command, const std::wstring& workingDirectory = {})
+{
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_NEW_CONSOLE,
+                        nullptr, workingDirectory.empty() ? nullptr : workingDirectory.c_str(), &startup, &process)) {
+        ShowError(L"Could not start the terminal (Windows error " + std::to_wstring(GetLastError()) + L").");
+        return false;
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return true;
+}
+
+std::wstring QuotePosixShellArgument(std::wstring_view argument)
+{
+    std::wstring quoted(L"'");
+    for (wchar_t character : argument) {
+        if (character == L'\'')
+            quoted += L"'\\\"'\\\"'";
+        else
+            quoted.push_back(character);
+    }
+    quoted.push_back(L'\'');
+    return quoted;
+}
+
+std::wstring ReadProfileValue(const std::wstring& iniPath, const std::wstring& section, const wchar_t* key)
+{
+    std::array<wchar_t, 32768> value{};
+    const DWORD length = GetPrivateProfileStringW(section.c_str(), key, L"", value.data(),
+                                                   static_cast<DWORD>(value.size()), iniPath.c_str());
+    return std::wstring(value.data(), length);
+}
+
+bool SplitSshAddress(const std::wstring& address, std::wstring& host, std::wstring& port)
+{
+    host = address;
+    port = L"22";
+    if (address.empty())
+        return false;
+    if (address.front() == L'[') {
+        const size_t closing = address.find(L']');
+        if (closing == std::wstring::npos)
+            return false;
+        host = address.substr(1, closing - 1);
+        if (closing + 1 < address.size()) {
+            if (address[closing + 1] != L':' || closing + 2 == address.size())
+                return false;
+            port = address.substr(closing + 2);
+        }
+    } else {
+        const size_t firstColon = address.find(L':');
+        const size_t lastColon = address.rfind(L':');
+        if (firstColon == lastColon && lastColon != std::wstring::npos) {
+            const std::wstring possiblePort = address.substr(lastColon + 1);
+            if (!possiblePort.empty() && std::all_of(possiblePort.begin(), possiblePort.end(),
+                                                     [](wchar_t value) { return iswdigit(value) != 0; })) {
+                host = address.substr(0, lastColon);
+                port = possiblePort;
+            }
+        }
+    }
+    return !host.empty() && !port.empty() && std::all_of(port.begin(), port.end(),
+                                                          [](wchar_t value) { return iswdigit(value) != 0; });
+}
+
+bool OpenSftpTerminal(const std::wstring& panelPath)
+{
+    std::wstring session;
+    std::wstring remotePath;
+    if (!ParseSftpPanelPath(panelPath, session, remotePath)) {
+        ShowError(L"Could not determine the SFTP session from the active panel path.");
+        return false;
+    }
+    const std::filesystem::path tcDirectory = std::filesystem::path(GetExecutableDirectory()).parent_path().parent_path().parent_path();
+    const std::wstring iniPath = (tcDirectory / L"sftpplug.ini").wstring();
+    const std::wstring server = ReadProfileValue(iniPath, session, L"server");
+    const std::wstring user = ReadProfileValue(iniPath, session, L"user");
+    std::wstring host;
+    std::wstring port;
+    if (user.empty() || !SplitSshAddress(server, host, port)) {
+        ShowError(L"The active SFTP session does not contain a valid SSH server and user.");
+        return false;
+    }
+    const std::wstring ssh = GetSystemExecutable(L"OpenSSH\\ssh.exe");
+    if (ssh.empty()) {
+        ShowError(L"Windows OpenSSH ssh.exe is not installed.");
+        return false;
+    }
+    if (host.find(L':') != std::wstring::npos)
+        host = L"[" + host + L"]";
+    std::wstring command = QuoteWindowsArgument(ssh) +
+        L" -o ServerAliveInterval=30 -o ServerAliveCountMax=120 -o TCPKeepAlive=yes" +
+        L" -p " + QuoteWindowsArgument(port) + L" -t " + QuoteWindowsArgument(user + L"@" + host);
+    const bool windowsRemotePath = remotePath.size() >= 3 && remotePath[0] == L'/' &&
+        std::iswalpha(remotePath[1]) && remotePath[2] == L':';
+    if (windowsRemotePath) {
+        std::replace(remotePath.begin(), remotePath.end(), L'/', L'\\');
+        remotePath.erase(remotePath.begin());
+        command += L" " + QuoteWindowsArgument(L"cmd.exe /K cd /d " + QuoteWindowsArgument(remotePath));
+    } else if (remotePath != L"/") {
+        command += L" " + QuoteWindowsArgument(L"cd -- " + QuotePosixShellArgument(remotePath) + L" && exec \"${SHELL:-/bin/sh}\" -l");
+    }
+    return LaunchTerminal(ssh, std::move(command));
+}
+
+bool OpenTerminal(const std::wstring& sourcePath)
+{
+    const std::wstring path = NormalizePanelPath(sourcePath);
+    if (IsSftpVirtualPath(path))
+        return OpenSftpTerminal(path);
+
+    std::wstring distribution;
+    std::wstring linuxPath;
+    if (ParseWslUncPath(path, distribution, linuxPath)) {
+        const std::wstring wsl = GetSystemExecutable(L"wsl.exe");
+        if (wsl.empty()) {
+            ShowError(L"wsl.exe is not installed.");
+            return false;
+        }
+        // WSL treats the distribution name as a literal token. Do not quote it.
+        return LaunchTerminal(wsl, QuoteWindowsArgument(wsl) + L" -d " + distribution +
+                              L" --cd " + QuoteWindowsArgument(linuxPath), GetExecutableDirectory());
+    }
+
+    const std::wstring cmd = GetSystemExecutable(L"cmd.exe");
+    if (cmd.empty()) {
+        ShowError(L"cmd.exe is not available.");
+        return false;
+    }
+    const bool unc = path.starts_with(L"\\\\");
+    return LaunchTerminal(cmd, QuoteWindowsArgument(cmd) + (unc ? L" /K pushd " : L" /K cd /d ") + QuoteWindowsArgument(path));
 }
 
 std::wstring DescribeOperationPath(std::wstring_view path)
@@ -1556,12 +1758,13 @@ bool InitializePortableRouter()
         { L"em_SftpRemoteDelete", L"delete \"%P.\" \"%T.\" \"%L\"" },
         { L"em_SftpPrewarmManifest", L"prewarm \"%P.\"" },
         { L"em_SftpLocalDiff", L"localdiff \"%P.\" \"%T.\"" },
+        { L"em_SftpOpenTerminal", L"terminal \"%P.\"" },
     };
     const wchar_t* const shortcuts[][2] = {
         { L"A+F5", L"em_SftpArchivePack" }, { L"A+F6", L"em_SftpArchiveUnpack" },
         { L"A+F7", L"em_SftpTarCopy" }, { L"A+F8", L"em_SftpTarMove" },
         { L"A+F9", L"em_SftpRemoteDelete" }, { L"A+F11", L"em_SftpPrewarmManifest" },
-        { L"A+F12", L"em_SftpLocalDiff" },
+        { L"A+F12", L"em_SftpLocalDiff" }, { L"C+G", L"em_SftpOpenTerminal" },
     };
     constexpr wchar_t kRouterCommand[] = L"%COMMANDER_PATH%\\Plugins\\Wfx\\SFTP\\SftpArchiveRouter.exe";
     std::wstring error;
@@ -1578,7 +1781,7 @@ bool InitializePortableRouter()
             return false;
         }
     }
-    ShowRouterMessage(L"Registered Alt+F5 through Alt+F9, Alt+F11, and Alt+F12 for SFTP archive operations. Restart Total Commander to apply them.",
+    ShowRouterMessage(L"Registered Ctrl+G terminal launch and Alt+F5 through Alt+F9, Alt+F11, and Alt+F12 SFTP operations. Restart Total Commander to apply them.",
                       L"SFTP Archive Router", MB_OK | MB_ICONINFORMATION);
     return true;
 }
@@ -1786,7 +1989,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (!argv || argc < 2) {
-        ShowError(L"Usage: SftpArchiveRouter.exe init\n       SftpArchiveRouter.exe prewarm <source-path>\n       SftpArchiveRouter.exe localdiff <source-path> <target-path>\n       SftpArchiveRouter.exe copy|move|delete|pack|unpack <source-path> <target-path> <selected-list>");
+        ShowError(L"Usage: SftpArchiveRouter.exe init\n       SftpArchiveRouter.exe terminal <source-path>\n       SftpArchiveRouter.exe prewarm <source-path>\n       SftpArchiveRouter.exe localdiff <source-path> <target-path>\n       SftpArchiveRouter.exe copy|move|delete|pack|unpack <source-path> <target-path> <selected-list>");
         if (argv) LocalFree(argv);
         return 2;
     }
@@ -1839,6 +2042,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     if (argc == 3) {
         const std::wstring sourcePath(argv[2]);
         LocalFree(argv);
+        if (operation == L"terminal")
+            return OpenTerminal(sourcePath) ? 0 : 1;
         if (operation == L"prewarm")
             return FinishSftpOperation(sourcePath, L"", L"Prewarm", L"Alt+F11", Prewarm(sourcePath));
         ShowError(L"Unknown archive router command.");
