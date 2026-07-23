@@ -425,6 +425,29 @@ bool LaunchTerminal(const std::wstring& executable, std::wstring command, const 
     return true;
 }
 
+std::wstring FindPathExecutable(const wchar_t* fileName)
+{
+    std::array<wchar_t, 32768> path{};
+    const DWORD length = SearchPathW(nullptr, fileName, nullptr, static_cast<DWORD>(path.size()), path.data(), nullptr);
+    return length == 0 || length >= path.size() ? std::wstring{} : std::wstring(path.data(), length);
+}
+
+bool LaunchWindowsTerminal(const std::wstring& title, std::wstring shellCommand, bool splitPane)
+{
+    const std::wstring windowsTerminal = FindPathExecutable(L"wt.exe");
+    if (windowsTerminal.empty()) {
+        ShowError(L"Windows Terminal wt.exe is not available on PATH.");
+        return false;
+    }
+
+    // Window selection is governed by Windows Terminal's windowingBehavior. This
+    // avoids overriding the user's useExisting/useAnyExisting single-window policy.
+    std::wstring command = QuoteWindowsArgument(windowsTerminal) + L" " +
+        (splitPane ? L"split-pane" : L"new-tab") + L" --title " + QuoteWindowsArgument(title) +
+        L" --suppressApplicationTitle " + shellCommand;
+    return LaunchTerminal(windowsTerminal, std::move(command));
+}
+
 std::wstring QuotePosixShellArgument(std::wstring_view argument)
 {
     std::wstring quoted(L"'");
@@ -478,7 +501,7 @@ bool SplitSshAddress(const std::wstring& address, std::wstring& host, std::wstri
                                                           [](wchar_t value) { return iswdigit(value) != 0; });
 }
 
-bool OpenSftpTerminal(const std::wstring& panelPath)
+bool OpenSftpTerminal(const std::wstring& panelPath, bool windowsTerminal = false, bool splitPane = false)
 {
     std::wstring session;
     std::wstring remotePath;
@@ -515,14 +538,16 @@ bool OpenSftpTerminal(const std::wstring& panelPath)
     } else if (remotePath != L"/") {
         command += L" " + QuoteWindowsArgument(L"cd -- " + QuotePosixShellArgument(remotePath) + L" && exec \"${SHELL:-/bin/sh}\" -l");
     }
+    if (windowsTerminal)
+        return LaunchWindowsTerminal(L"ssh:" + session, std::move(command), splitPane);
     return LaunchTerminal(ssh, std::move(command));
 }
 
-bool OpenTerminal(const std::wstring& sourcePath)
+bool OpenTerminal(const std::wstring& sourcePath, bool windowsTerminal = false, bool splitPane = false)
 {
     const std::wstring path = NormalizePanelPath(sourcePath);
     if (IsSftpVirtualPath(path))
-        return OpenSftpTerminal(path);
+        return OpenSftpTerminal(path, windowsTerminal, splitPane);
 
     std::wstring distribution;
     std::wstring linuxPath;
@@ -532,9 +557,11 @@ bool OpenTerminal(const std::wstring& sourcePath)
             ShowError(L"wsl.exe is not installed.");
             return false;
         }
-        // WSL treats the distribution name as a literal token. Do not quote it.
-        return LaunchTerminal(wsl, QuoteWindowsArgument(wsl) + L" -d " + distribution +
-                              L" --cd " + QuoteWindowsArgument(linuxPath), GetExecutableDirectory());
+        const std::wstring command = QuoteWindowsArgument(wsl) + L" -d " + QuoteWindowsArgument(distribution) +
+            L" --cd " + QuoteWindowsArgument(linuxPath);
+        if (windowsTerminal)
+            return LaunchWindowsTerminal(L"wsl:" + distribution, command, splitPane);
+        return LaunchTerminal(wsl, command, GetExecutableDirectory());
     }
 
     const std::wstring cmd = GetSystemExecutable(L"cmd.exe");
@@ -543,7 +570,10 @@ bool OpenTerminal(const std::wstring& sourcePath)
         return false;
     }
     const bool unc = path.starts_with(L"\\\\");
-    return LaunchTerminal(cmd, QuoteWindowsArgument(cmd) + (unc ? L" /K pushd " : L" /K cd /d ") + QuoteWindowsArgument(path));
+    const std::wstring command = QuoteWindowsArgument(cmd) + (unc ? L" /K pushd " : L" /K cd /d ") + QuoteWindowsArgument(path);
+    if (windowsTerminal)
+        return LaunchWindowsTerminal(L"local:win", command, splitPane);
+    return LaunchTerminal(cmd, command);
 }
 
 std::wstring DescribeOperationPath(std::wstring_view path)
@@ -1759,12 +1789,15 @@ bool InitializePortableRouter(bool quiet = false)
         { L"em_SftpPrewarmManifest", L"prewarm \"%P.\"" },
         { L"em_SftpLocalDiff", L"localdiff \"%P.\" \"%T.\"" },
         { L"em_SftpOpenTerminal", L"terminal \"%P.\"" },
+        { L"em_SftpOpenWindowsTerminalTab", L"terminal-wt tab \"%P.\"" },
+        { L"em_SftpSplitWindowsTerminal", L"terminal-wt split \"%P.\"" },
     };
     const wchar_t* const shortcuts[][2] = {
         { L"A+F5", L"em_SftpArchivePack" }, { L"A+F6", L"em_SftpArchiveUnpack" },
         { L"A+F7", L"em_SftpTarCopy" }, { L"A+F8", L"em_SftpTarMove" },
         { L"A+F9", L"em_SftpRemoteDelete" }, { L"A+F11", L"em_SftpPrewarmManifest" },
         { L"A+F12", L"em_SftpLocalDiff" }, { L"C+G", L"em_SftpOpenTerminal" },
+        { L"CAS+G", L"em_SftpOpenWindowsTerminalTab" }, { L"AS+G", L"em_SftpSplitWindowsTerminal" },
     };
     constexpr wchar_t kRouterCommand[] = L"%COMMANDER_PATH%\\Plugins\\Wfx\\SFTP\\SftpArchiveRouter.exe";
     std::wstring error;
@@ -1781,8 +1814,14 @@ bool InitializePortableRouter(bool quiet = false)
             return false;
         }
     }
+    // Alt+G conflicts with Total Commander's menu accelerator. Remove the prior
+    // router binding while moving the Windows Terminal tab command to Ctrl+Alt+Shift+G.
+    if (!SetIniValue(wincmdIni, L"Shortcuts", L"A+G", nullptr, error)) {
+        ShowError(error);
+        return false;
+    }
     if (!quiet) {
-        ShowRouterMessage(L"Registered Ctrl+G terminal launch and Alt+F5 through Alt+F9, Alt+F11, and Alt+F12 SFTP operations. Restart Total Commander to apply them.",
+        ShowRouterMessage(L"Registered Ctrl+G console launch, Ctrl+Alt+Shift+G Windows Terminal tabs, Alt+Shift+G Windows Terminal splits, and Alt+F5 through Alt+F9, Alt+F11, and Alt+F12 SFTP operations. Restart Total Commander to apply them.",
                           L"SFTP Archive Router", MB_OK | MB_ICONINFORMATION);
     }
     return true;
@@ -2010,7 +2049,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (!argv || argc < 2) {
-        ShowError(L"Usage: SftpArchiveRouter.exe init [-y]\n       SftpArchiveRouter.exe terminal <source-path>\n       SftpArchiveRouter.exe prewarm <source-path>\n       SftpArchiveRouter.exe localdiff <source-path> <target-path>\n       SftpArchiveRouter.exe copy|move|delete|pack|unpack <source-path> <target-path> <selected-list>");
+        ShowError(L"Usage: SftpArchiveRouter.exe init [-y]\n       SftpArchiveRouter.exe terminal <source-path>\n       SftpArchiveRouter.exe terminal-wt <tab|split> <source-path>\n       SftpArchiveRouter.exe prewarm <source-path>\n       SftpArchiveRouter.exe localdiff <source-path> <target-path>\n       SftpArchiveRouter.exe copy|move|delete|pack|unpack <source-path> <target-path> <selected-list>");
         if (argv) LocalFree(argv);
         return 2;
     }
@@ -2099,11 +2138,19 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         return 2;
     }
     if (argc == 4) {
-        const std::wstring sourcePath(argv[2]);
-        const std::wstring targetPath(argv[3]);
+        const std::wstring firstArgument(argv[2]);
+        const std::wstring secondArgument(argv[3]);
         LocalFree(argv);
+        if (operation == L"terminal-wt") {
+            if (firstArgument == L"tab")
+                return OpenTerminal(secondArgument, true) ? 0 : 1;
+            if (firstArgument == L"split")
+                return OpenTerminal(secondArgument, true, true) ? 0 : 1;
+            ShowError(L"Windows Terminal mode must be tab or split.");
+            return 2;
+        }
         if (operation == L"localdiff")
-            return FinishSftpOperation(sourcePath, targetPath, L"Diff/sync", L"Alt+F12", LocalDiff(sourcePath, targetPath));
+            return FinishSftpOperation(firstArgument, secondArgument, L"Diff/sync", L"Alt+F12", LocalDiff(firstArgument, secondArgument));
         ShowError(L"Unknown archive router command.");
         return 2;
     }
