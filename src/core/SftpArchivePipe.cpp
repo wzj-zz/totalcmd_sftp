@@ -14,6 +14,7 @@
 #include <vector>
 #include "CoreUtils.h"
 #include "SftpArchivePipe.h"
+#include "SftpArchiveOpenRetry.h"
 #include "SftpClient.h"
 #include "SftpInternal.h"
 #include "PluginEntryPoints.h"
@@ -438,6 +439,27 @@ std::string EncodePowerShellCommand(const std::wstring& script)
     return "powershell.exe -NoProfile -NonInteractive -InputFormat None -EncodedCommand " + encoded;
 }
 
+std::wstring QuoteWindowsArgument(const std::wstring& text)
+{
+    std::wstring quoted(L"\"");
+    size_t backslashes = 0;
+    for (const wchar_t character : text) {
+        if (character == L'\\') {
+            ++backslashes;
+            continue;
+        }
+        if (character == L'\"')
+            quoted.append(backslashes * 2 + 1, L'\\');
+        else
+            quoted.append(backslashes, L'\\');
+        quoted.push_back(character);
+        backslashes = 0;
+    }
+    quoted.append(backslashes * 2, L'\\');
+    quoted.push_back(L'\"');
+    return quoted;
+}
+
 std::string QuoteCmdArgument(const std::wstring& text)
 {
     std::string quoted("\"");
@@ -645,19 +667,8 @@ std::string BuildRemoteReceiveCommand(const RemoteEndpoint& target, bool extract
 {
     if (IsWindowsRemotePath(target.remotePath)) {
         const std::wstring targetPath = ToWindowsPath(target.remotePath);
-        const std::wstring path = QuotePowerShell(targetPath);
-        if (!extract) {
-            return EncodePowerShellCommand(
-                L"$input=[Console]::OpenStandardInput();$parent=[IO.Path]::GetDirectoryName(" + path +
-                L");if(-not [IO.Directory]::Exists($parent)){exit 1};"
-                L"$temp=[IO.Path]::Combine($parent,'.sftp-archive-'+[guid]::NewGuid().ToString()+'.tmp');"
-                L"$file=[IO.File]::Open($temp,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None);"
-                L"$exitCode=1;try{$input.CopyTo($file);$file.Dispose();$file=$null;& tar.exe -tf $temp *> $null;"
-                L"if($LASTEXITCODE -eq 0){if([IO.File]::Exists(" + path +
-                L")){[IO.File]::Replace($temp," + path + L",$null)}else{[IO.File]::Move($temp," + path +
-                L")};$exitCode=0}}finally{if($file){$file.Dispose()};$input.Dispose();"
-                L"Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue};exit $exitCode");
-        }
+        if (!extract)
+            return {};
         // tar.exe reads the SSH channel directly. PowerShell's standard-input
         // wrapper can stall after large archive streams on Windows OpenSSH.
         return "tar.exe -xf - -C " + QuoteCmdArgument(targetPath);
@@ -787,6 +798,297 @@ bool StreamPipeToConsumer(HANDLE pipe, RemoteEndpoint& target, const std::string
     return closeOk && ok;
 }
 
+bool RemoveWindowsArchiveTemp(RemoteEndpoint& target, const std::string& temporaryPath)
+{
+    if (!target.cs || !target.cs->sftpsession)
+        return false;
+    for (;;) {
+        int rc = 0;
+        {
+            ScopedSshSessionUse sessionUse(target.cs);
+            rc = target.cs->sftpsession->unlink(temporaryPath.c_str());
+        }
+        if (rc != LIBSSH2_ERROR_EAGAIN)
+            return rc == 0;
+        if (!WaitForArchiveIo(target.cs))
+            return false;
+    }
+}
+
+bool OpenWindowsArchiveTemp(RemoteEndpoint& target, const std::string& temporaryPath,
+                            std::unique_ptr<ISftpHandle>& output)
+{
+    if (!target.cs || !target.cs->sftpsession)
+        return false;
+    output = OpenSftpArchiveFileWithRetry(
+        temporaryPath.c_str(), LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT | LIBSSH2_FXF_EXCL, 0600,
+        [&](const char* path, unsigned long flags, long mode) {
+            ScopedSshSessionUse sessionUse(target.cs);
+            return target.cs->sftpsession->open(path, flags, mode);
+        },
+        [&] { return target.cs->session ? target.cs->session->lastErrno() : 0; },
+        [&] { return WaitForArchiveIo(target.cs); });
+    return !!output;
+}
+
+bool WriteWindowsArchiveTemp(RemoteEndpoint& target, ISftpHandle* output, const char* data, size_t length,
+                             std::string& error)
+{
+    size_t written = 0;
+    while (written < length) {
+        ssize_t rc = 0;
+        {
+            ScopedSshSessionUse sessionUse(target.cs);
+            rc = output->write(data + written, length - written);
+        }
+        if (rc > 0) {
+            written += static_cast<size_t>(rc);
+            continue;
+        }
+        if (rc == LIBSSH2_ERROR_EAGAIN && WaitForArchiveIo(target.cs))
+            continue;
+        error = "Could not write the temporary Windows archive through SFTP.";
+        return false;
+    }
+    return true;
+}
+
+bool CloseWindowsArchiveTemp(RemoteEndpoint& target, std::unique_ptr<ISftpHandle>& output)
+{
+    int closeResult = 0;
+    while (output) {
+        {
+            ScopedSshSessionUse sessionUse(target.cs);
+            closeResult = output->close();
+        }
+        if (closeResult != LIBSSH2_ERROR_EAGAIN)
+            break;
+        if (!WaitForArchiveIo(target.cs)) {
+            closeResult = -1;
+            break;
+        }
+    }
+    output.reset();
+    return closeResult == 0;
+}
+
+bool PublishWindowsArchiveTemp(RemoteEndpoint& target, const std::string& temporaryPath,
+                               std::string& error)
+{
+    wchar_t systemDirectory[MAX_PATH]{};
+    const UINT systemLength = GetSystemDirectoryW(systemDirectory, ARRAYSIZE(systemDirectory));
+    const std::wstring ssh = systemLength && systemLength < ARRAYSIZE(systemDirectory)
+        ? std::wstring(systemDirectory) + L"\\OpenSSH\\ssh.exe"
+        : L"";
+    if (ssh.empty() || GetFileAttributesW(ssh.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        error = "Windows OpenSSH ssh.exe is required to publish the completed archive.";
+        return false;
+    }
+    if (target.cs->user.empty() || target.cs->server.empty()) {
+        error = "The Windows SFTP archive target has no SSH user or server.";
+        return false;
+    }
+
+    const std::wstring temporary = QuotePowerShell(ToWindowsPath(temporaryPath));
+    const std::wstring destination = QuotePowerShell(ToWindowsPath(target.remotePath));
+    const std::string remoteCommand = EncodePowerShellCommand(
+        L"$ErrorActionPreference='Stop';$deadline=[DateTime]::UtcNow.AddSeconds(10);$lastError='';do{try{"
+        L"& tar.exe -tf " + temporary + L" *> $null;if($LASTEXITCODE -ne 0){throw 'The staged archive is invalid'};"
+        L"if([IO.File]::Exists(" + destination + L")){[IO.File]::Replace(" + temporary + L"," + destination + L",$null)}else{"
+        L"Move-Item -LiteralPath " + temporary + L" -Destination " + destination + L" -ErrorAction Stop};"
+        L"if([IO.File]::Exists(" + destination + L") -and -not [IO.File]::Exists(" + temporary + L")){exit 0}}"
+        L"catch{$lastError=$_.Exception.Message};Start-Sleep -Milliseconds 100}while([DateTime]::UtcNow -lt $deadline);"
+        L"[Console]::Error.WriteLine($lastError);exit 1");
+    std::array<char, 1024> hostBuffer{};
+    strncpy_s(hostBuffer.data(), hostBuffer.size(), target.cs->server.c_str(), _TRUNCATE);
+    WORD parsedPort = 22;
+    if (!ParseAddress(hostBuffer.data(), hostBuffer.data(), &parsedPort, 22)) {
+        error = "The Windows SFTP archive target has an invalid SSH server address.";
+        return false;
+    }
+    std::wstring host = unicode_util::utf8_to_wstring(hostBuffer.data());
+    if (host.find(L':') != std::wstring::npos && !(host.starts_with(L"[") && host.ends_with(L"]")))
+        host = L"[" + host + L"]";
+    const unsigned short port = target.cs->customport ? target.cs->customport : parsedPort;
+    std::wstring command = QuoteWindowsArgument(ssh) +
+        L" -n -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=30 -o ServerAliveCountMax=120" +
+        L" -o TCPKeepAlive=yes -p " + std::to_wstring(port) + L" " +
+        QuoteWindowsArgument(unicode_util::utf8_to_wstring(target.cs->user) + L"@" + host) + L" " +
+        QuoteWindowsArgument(unicode_util::utf8_to_wstring(remoteCommand));
+    std::vector<wchar_t> commandBuffer(command.begin(), command.end());
+    commandBuffer.push_back(L'\0');
+    SECURITY_ATTRIBUTES inheritable{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+    HANDLE stderrRead = nullptr;
+    HANDLE stderrWrite = nullptr;
+    if (!CreatePipe(&stderrRead, &stderrWrite, &inheritable, 0)) {
+        error = "Could not capture independent SSH archive publish errors.";
+        return false;
+    }
+    SetHandleInformation(stderrRead, HANDLE_FLAG_INHERIT, 0);
+    HANDLE nullHandle = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE, &inheritable,
+                                    OPEN_EXISTING, 0, nullptr);
+    if (nullHandle == INVALID_HANDLE_VALUE) {
+        CloseHandle(stderrRead);
+        CloseHandle(stderrWrite);
+        error = "Could not prepare independent SSH archive publish I/O.";
+        return false;
+    }
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdInput = nullHandle;
+    startup.hStdOutput = nullHandle;
+    startup.hStdError = stderrWrite;
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(ssh.c_str(), commandBuffer.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
+                        nullptr, nullptr, &startup, &process)) {
+        CloseHandle(stderrRead);
+        CloseHandle(stderrWrite);
+        CloseHandle(nullHandle);
+        error = "Could not start the independent SSH archive publish command.";
+        return false;
+    }
+    CloseHandle(stderrWrite);
+    CloseHandle(nullHandle);
+    const DWORD wait = WaitForSingleObject(process.hProcess, kArchiveCompletionTimeoutMs);
+    DWORD exitCode = 1;
+    if (wait == WAIT_OBJECT_0)
+        GetExitCodeProcess(process.hProcess, &exitCode);
+    else if (wait == WAIT_TIMEOUT)
+        TerminateProcess(process.hProcess, 1);
+    std::string stderrText;
+    std::array<char, 1024> stderrBuffer{};
+    DWORD stderrLength = 0;
+    while (ReadFile(stderrRead, stderrBuffer.data(), static_cast<DWORD>(stderrBuffer.size()), &stderrLength, nullptr) && stderrLength)
+        stderrText.append(stderrBuffer.data(), stderrLength);
+    CloseHandle(stderrRead);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    if (wait != WAIT_OBJECT_0 || exitCode != 0) {
+        error = wait == WAIT_TIMEOUT
+            ? "The independent SSH archive publish command timed out."
+            : stderrText.empty()
+                ? "The independent SSH archive publish command failed (exit status " + std::to_string(exitCode) + ")."
+                : stderrText;
+        return false;
+    }
+    return true;
+}
+
+bool StreamPipeToWindowsArchiveFile(HANDLE pipe, RemoteEndpoint& target, std::string& error)
+{
+    if (!target.cs || !target.cs->sftpsession) {
+        error = "The Windows SFTP archive target is unavailable.";
+        return false;
+    }
+
+    // Keep the staging upload and the publish command isolated from panel I/O
+    // on the same non-blocking libssh2 session.
+    ScopedSshSessionUse archiveUse(target.cs);
+    const std::string parent = RemoteParentPath(target.remotePath);
+    const std::string temporaryPath = parent + "/.sftp-archive-" + std::to_string(GetCurrentProcessId()) + "-" +
+        std::to_string(GetTickCount64()) + ".tmp";
+    std::unique_ptr<ISftpHandle> output;
+    if (!OpenWindowsArchiveTemp(target, temporaryPath, output)) {
+        error = "Could not create a temporary archive on the Windows SFTP target.";
+        return false;
+    }
+
+    SendResult(pipe, 0, "");
+    std::array<char, kChunkSize> buffer{};
+    bool ok = true;
+    bool drainSender = false;
+    for (;;) {
+        DWORD length = 0;
+        if (!ReadExact(pipe, &length, sizeof(length))) {
+            error = "Archive sender disconnected.";
+            ok = false;
+            break;
+        }
+        if (length == 0)
+            break;
+        if (length > buffer.size() || !ReadExact(pipe, buffer.data(), length)) {
+            error = "Archive sender disconnected.";
+            ok = false;
+            break;
+        }
+        if (!WriteWindowsArchiveTemp(target, output.get(), buffer.data(), length, error)) {
+            ok = false;
+            drainSender = true;
+            break;
+        }
+        if (!ok)
+            break;
+    }
+    if (drainSender)
+        DrainArchiveSender(pipe);
+
+    if (!CloseWindowsArchiveTemp(target, output)) {
+        error = "Could not finish the temporary Windows archive through SFTP.";
+        ok = false;
+    }
+
+    if (ok)
+        ok = PublishWindowsArchiveTemp(target, temporaryPath, error);
+    if (!ok)
+        RemoveWindowsArchiveTemp(target, temporaryPath);
+    return ok;
+}
+
+bool StreamRemoteToWindowsArchive(RemoteEndpoint& source, const std::string& sourceCommand,
+                                  RemoteEndpoint& target, std::string& error)
+{
+    if (!target.cs || !target.cs->sftpsession) {
+        error = "The Windows SFTP archive target is unavailable.";
+        return false;
+    }
+
+    ScopedSshSessionUse targetUse(target.cs);
+    ScopedSshSessionUse sourceUse(source.cs);
+    const std::string parent = RemoteParentPath(target.remotePath);
+    const std::string temporaryPath = parent + "/.sftp-archive-" + std::to_string(GetCurrentProcessId()) + "-" +
+        std::to_string(GetTickCount64()) + ".tmp";
+    std::unique_ptr<ISftpHandle> output;
+    if (!OpenWindowsArchiveTemp(target, temporaryPath, output)) {
+        error = "Could not create a temporary archive on the Windows SFTP target.";
+        return false;
+    }
+
+    auto sourceChannel = StartCommand(source.cs, sourceCommand, error);
+    if (!sourceChannel) {
+        CloseWindowsArchiveTemp(target, output);
+        RemoveWindowsArchiveTemp(target, temporaryPath);
+        return false;
+    }
+
+    std::array<char, kChunkSize> buffer{};
+    bool ok = true;
+    for (;;) {
+        ssize_t count = 0;
+        if (!ReadRemoteChunk(sourceChannel.get(), source.cs, buffer.data(), buffer.size(), count, error)) {
+            ok = false;
+            break;
+        }
+        if (count == 0)
+            break;
+        // Keep draining a failed producer so its remote tar cannot block on stdout.
+        if (ok && !WriteWindowsArchiveTemp(target, output.get(), buffer.data(), static_cast<size_t>(count), error))
+            ok = false;
+    }
+    const bool sourceOk = CloseCommand(sourceChannel, source.cs, false, error);
+    if (!CloseWindowsArchiveTemp(target, output)) {
+        if (error.empty())
+            error = "Could not finish the temporary Windows archive through SFTP.";
+        ok = false;
+    }
+    if (ok && sourceOk)
+        ok = PublishWindowsArchiveTemp(target, temporaryPath, error);
+    if (!ok || !sourceOk)
+        RemoveWindowsArchiveTemp(target, temporaryPath);
+    return ok && sourceOk;
+}
+
 bool StreamRemoteToRemote(RemoteEndpoint& source, const std::string& sourceCommand,
                           RemoteEndpoint& target, const std::string& targetCommand, std::string& error)
 {
@@ -848,8 +1150,12 @@ void ServeClient(HANDLE pipe)
     if (request.operation == kArchivePut || request.operation == kArchiveExtract) {
         RemoteEndpoint target;
         if (OpenEndpoint(targetPath, target, error)) {
-            const std::string command = BuildRemoteReceiveCommand(target, request.operation == kArchiveExtract);
-            ok = StreamPipeToConsumer(pipe, target, command, error);
+            if (request.operation == kArchivePut && IsWindowsRemotePath(target.remotePath)) {
+                ok = StreamPipeToWindowsArchiveFile(pipe, target, error);
+            } else {
+                const std::string command = BuildRemoteReceiveCommand(target, request.operation == kArchiveExtract);
+                ok = StreamPipeToConsumer(pipe, target, command, error);
+            }
             if (ok)
                 InvalidateSftpManifestCache(target.cs);
         }
@@ -866,8 +1172,12 @@ void ServeClient(HANDLE pipe)
         RemoteEndpoint target;
         if (OpenEndpoint(sourcePath, source, error) && OpenEndpoint(targetPath, target, error)) {
             const std::string sourceCommand = BuildRemotePackCommand(source, items);
-            const std::string targetCommand = BuildRemoteReceiveCommand(target, request.operation == kArchivePackExtractRemote);
-            ok = StreamRemoteToRemote(source, sourceCommand, target, targetCommand, error);
+            if (request.operation == kArchivePackToRemote && IsWindowsRemotePath(target.remotePath)) {
+                ok = StreamRemoteToWindowsArchive(source, sourceCommand, target, error);
+            } else {
+                const std::string targetCommand = BuildRemoteReceiveCommand(target, request.operation == kArchivePackExtractRemote);
+                ok = StreamRemoteToRemote(source, sourceCommand, target, targetCommand, error);
+            }
             if (ok)
                 InvalidateSftpManifestCache(target.cs);
         }

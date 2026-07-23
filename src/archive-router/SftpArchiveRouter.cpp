@@ -1736,7 +1736,7 @@ bool SetIniValue(const std::wstring& path, const wchar_t* section, const wchar_t
     return false;
 }
 
-bool InitializePortableRouter()
+bool InitializePortableRouter(bool quiet = false)
 {
     if (FindTotalCommanderWindow()) {
         ShowError(L"Close Total Commander before registering SFTP router shortcuts.");
@@ -1781,8 +1781,10 @@ bool InitializePortableRouter()
             return false;
         }
     }
-    ShowRouterMessage(L"Registered Ctrl+G terminal launch and Alt+F5 through Alt+F9, Alt+F11, and Alt+F12 SFTP operations. Restart Total Commander to apply them.",
-                      L"SFTP Archive Router", MB_OK | MB_ICONINFORMATION);
+    if (!quiet) {
+        ShowRouterMessage(L"Registered Ctrl+G terminal launch and Alt+F5 through Alt+F9, Alt+F11, and Alt+F12 SFTP operations. Restart Total Commander to apply them.",
+                          L"SFTP Archive Router", MB_OK | MB_ICONINFORMATION);
+    }
     return true;
 }
 
@@ -2008,7 +2010,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (!argv || argc < 2) {
-        ShowError(L"Usage: SftpArchiveRouter.exe init\n       SftpArchiveRouter.exe terminal <source-path>\n       SftpArchiveRouter.exe prewarm <source-path>\n       SftpArchiveRouter.exe localdiff <source-path> <target-path>\n       SftpArchiveRouter.exe copy|move|delete|pack|unpack <source-path> <target-path> <selected-list>");
+        ShowError(L"Usage: SftpArchiveRouter.exe init [-y]\n       SftpArchiveRouter.exe terminal <source-path>\n       SftpArchiveRouter.exe prewarm <source-path>\n       SftpArchiveRouter.exe localdiff <source-path> <target-path>\n       SftpArchiveRouter.exe copy|move|delete|pack|unpack <source-path> <target-path> <selected-list>");
         if (argv) LocalFree(argv);
         return 2;
     }
@@ -2067,10 +2069,22 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             WriteUtf8TextFile(errorPath, g_nonInteractiveError.empty() ? L"Could not prewarm the remote directory tree." : g_nonInteractiveError);
         return result;
     }
+    if ((argc == 2 || argc == 3) && operation == L"init") {
+        const bool quiet = argc == 3 && std::wstring_view(argv[2]) == L"-y";
+        if (argc == 3 && !quiet) {
+            LocalFree(argv);
+            WriteStdErrUtf8(L"Usage: SftpArchiveRouter.exe init [-y]");
+            return 2;
+        }
+        LocalFree(argv);
+        if (quiet) {
+            g_nonInteractive = true;
+            g_nonInteractiveError.clear();
+        }
+        return InitializePortableRouter(quiet) ? 0 : 1;
+    }
     if (argc == 2) {
         LocalFree(argv);
-        if (operation == L"init")
-            return InitializePortableRouter() ? 0 : 1;
         ShowError(L"Unknown archive router command.");
         return 2;
     }

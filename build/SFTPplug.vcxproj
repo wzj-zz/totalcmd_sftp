@@ -238,6 +238,7 @@
     <ClInclude Include="..\src\include\LanPairSession.h" />
     <ClInclude Include="..\src\include\TrustedInstallerToken.h" />
     <ClInclude Include="..\src\include\SftpArchivePipe.h" />
+    <ClInclude Include="..\src\include\SftpArchiveOpenRetry.h" />
     <ClInclude Include="..\src\include\libssh2\libssh2.h" />
     <ClInclude Include="..\src\include\libssh2\libssh2_sftp.h" />
     <ClInclude Include="..\src\include\libssh2\libssh2_publickey.h" />
