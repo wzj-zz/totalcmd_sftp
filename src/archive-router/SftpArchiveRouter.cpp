@@ -557,7 +557,8 @@ bool OpenTerminal(const std::wstring& sourcePath, bool windowsTerminal = false, 
             ShowError(L"wsl.exe is not installed.");
             return false;
         }
-        const std::wstring command = QuoteWindowsArgument(wsl) + L" -d " + QuoteWindowsArgument(distribution) +
+        // WSL treats the distribution name as a literal token. Do not quote it.
+        const std::wstring command = QuoteWindowsArgument(wsl) + L" -d " + distribution +
             L" --cd " + QuoteWindowsArgument(linuxPath);
         if (windowsTerminal)
             return LaunchWindowsTerminal(L"wsl:" + distribution, command, splitPane);
