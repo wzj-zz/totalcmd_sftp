@@ -8,6 +8,10 @@
 - A successful build refreshes ignored `SFTP\` with only `SFTPplug.wfx64`, `SftpArchiveRouter.exe`, `SFTPplug.chm`, `sftp.php`, `language\zh-cn.lng`, `7z.exe`, `7z.dll`, and `7zip-License.txt`. Never add these generated artifacts to Git.
 - Deploy while Total Commander is stopped: delete the portable `<Total Commander>\Plugins\Wfx\SFTP\` directory, then copy the generated `SFTP\` directory in its place. Run `<Total Commander>\Plugins\Wfx\SFTP\SftpArchiveRouter.exe init -y` to register shortcuts without a success dialog, then restart Total Commander. Use plain `init` only when an interactive success dialog is wanted. Do not perform hash verification unless requested.
 
+## Documentation
+
+- Keep `README.md` and `README.zh-CN.md` in sync for user-facing behavior, shortcuts, deployment, and testing instructions. When changing one README, check whether the same user-visible information must be updated in the other before finishing or committing.
+
 ## Post-Deploy Archive Smoke Tests
 
 - Standard flow when the user supplies only `<Total Commander>`: run the default preflight below, build Release, deploy the generated `SFTP\` package, then run the default smoke command. Do not rediscover the script parameters or ask for target names when preflight passes.

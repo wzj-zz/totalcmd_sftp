@@ -1,5 +1,7 @@
 # Secure FTP Plugin for Total Commander
 
+[简体中文文档](README.zh-CN.md)
+
 Modern C++20 x64 filesystem plugin for Total Commander. It supports SSH/SFTP, SCP, shell fallback, PHP Agent, and LAN Pair connections.
 
 ## Features
