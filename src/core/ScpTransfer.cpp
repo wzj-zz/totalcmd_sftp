@@ -359,6 +359,7 @@ bool OpenScpDownloadChannel(pConnectSettings cs, const char* filename,
                 SftpCloseConnection(cs);
                 Sleep(RECONNECT_SLEEP_MS);
                 if (SftpConnect(cs) == SFTP_OK) {
+                    StartSshSessionServices(cs);
                     didReconnect = true;
                     continue;
                 }

@@ -68,8 +68,10 @@ static constexpr DWORD SOCKET_READ_POLL_MS      = 1000;
 static constexpr DWORD DIRECTORY_IO_POLL_MS     = 100;
 static constexpr DWORD TCP_KEEPALIVE_IDLE_MS    = 60000;
 static constexpr DWORD TCP_KEEPALIVE_INTERVAL_MS = 30000;
-static constexpr unsigned SSH_KEEPALIVE_INTERVAL_SEC = 60;
-static constexpr DWORD SSH_KEEPALIVE_WAKE_MS = 15000;
+// Equivalent to ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=120.
+static constexpr unsigned SSH_KEEPALIVE_INTERVAL_SEC = 30;
+static constexpr unsigned SSH_KEEPALIVE_COUNT_MAX = 120;
+static constexpr DWORD SSH_KEEPALIVE_WAKE_MS = 30000;
 static constexpr DWORD PROGRESS_UPDATE_MS       = 100;
 
 // Reconnect timeout (used by ReconnectSFTPChannelIfNeeded). Disconnect itself
@@ -120,6 +122,7 @@ void  ShowError(LPCSTR error);
 // Socket helpers (defined in SftpConnection.cpp)
 void  SetBlockingSocket(SOCKET s, bool blocking);
 void  EnableSocketKeepAlive(SOCKET s) noexcept;
+void  StartSshSessionServices(pConnectSettings cs) noexcept;
 void  StartSshKeepAlive(pConnectSettings cs) noexcept;
 void  StopSshKeepAlive(pConnectSettings cs) noexcept;
 void  EnterSshSessionUse(pConnectSettings cs) noexcept;

@@ -157,6 +157,12 @@
     <ClCompile Include="..\src\core\LngLoader.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\core\SshTunnel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\core\SshTunnelManager.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <!-- Header Files -->
   <ItemGroup>
@@ -292,6 +298,12 @@
     <ClInclude Include="..\src\include\LngLoader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\include\SshTunnel.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\include\SshTunnelManager.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <!-- libssh2 Headers -->
   <ItemGroup>
@@ -339,4 +351,3 @@
   <!-- Build Scripts -->
   <!-- Project Properties -->
 </Project>
-

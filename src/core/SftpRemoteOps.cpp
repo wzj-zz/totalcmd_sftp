@@ -412,7 +412,9 @@ int SftpFindFirstFileW(pConnectSettings cs, LPCWSTR remotedir, LPVOID* davdatapt
                     ShowStatusId(IDS_LOG_SCP_SESSION_LOST, nullptr, true);
                     SftpCloseConnection(cs);
                     Sleep(RECONNECT_SLEEP_MS);
-                    if (SftpConnect(cs) != SFTP_OK || !EnsureScpShell(cs)) {
+                    if (SftpConnect(cs) == SFTP_OK)
+                        StartSshSessionServices(cs);
+                    if (!cs->session || !EnsureScpShell(cs)) {
                         if (attempt == 1) { // If this is your second attempt, give up
                             ShowStatusId(IDS_LOG_SCP_NO_SHELL, nullptr, true);
                             return SFTP_FAILED;

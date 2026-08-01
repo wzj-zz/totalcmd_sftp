@@ -380,6 +380,7 @@ private:
     void    OnUseAgentChanged();
     void    OnJumpEnableChanged();
     void    OnJumpButton();
+    void    OnTunnelButton();
     void    OnProxyButton();
     void    OnProxyComboChanged();
     void    OnDeleteLastProxy();
@@ -1318,6 +1319,77 @@ static INT_PTR ShowLocalizedDialogBoxParam(int dialogId, HWND parent, DLGPROC dl
         }
     }
     return DialogBoxParam(hinst, MAKEINTRESOURCE(dialogId), parent, dlgProc, dlgParam);
+}
+
+struct TunnelDialogContext {
+    pConnectSettings settings = nullptr;
+};
+
+static INT_PTR WINAPI TunnelDlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    if (message == WM_INITDIALOG) {
+        auto* context = reinterpret_cast<TunnelDialogContext*>(lParam);
+        SetWindowLongPtr(hWnd, DWLP_USER, lParam);
+        if (!context || !context->settings) {
+            EndDialog(hWnd, IDCANCEL);
+            return TRUE;
+        }
+        LocalizeDlgControls(hWnd, IDS_TUNNEL_DLG_CAPTION, { { IDC_TUNNEL_HINT, IDS_TUNNEL_DLG_HINT } });
+        std::string text;
+        for (const SshTunnelRule& rule : context->settings->sshTunnels) {
+            if (!text.empty())
+                text += "\r\n";
+            text += FormatSshTunnelRule(rule);
+        }
+        SetDlgItemTextA(hWnd, IDC_TUNNEL_RULES, text.c_str());
+        return TRUE;
+    }
+    if (message != WM_COMMAND)
+        return FALSE;
+    if (LOWORD(wParam) == IDCANCEL) {
+        EndDialog(hWnd, IDCANCEL);
+        return TRUE;
+    }
+    if (LOWORD(wParam) != IDOK)
+        return FALSE;
+    auto* context = reinterpret_cast<TunnelDialogContext*>(GetWindowLongPtr(hWnd, DWLP_USER));
+    const int length = GetWindowTextLengthA(GetDlgItem(hWnd, IDC_TUNNEL_RULES));
+    std::string text(static_cast<size_t>(length) + 1, '\0');
+    GetDlgItemTextA(hWnd, IDC_TUNNEL_RULES, text.data(), length + 1);
+    text.resize(static_cast<size_t>(length));
+    std::vector<SshTunnelRule> rules;
+    for (size_t start = 0; start < text.size();) {
+        const size_t end = text.find_first_of("\r\n", start);
+        const std::string line = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        if (!line.empty()) {
+            SshTunnelRule rule;
+            std::string error;
+            if (!ParseSshTunnelRule(line, rule, error)) {
+                MessageBoxA(hWnd, ("Invalid SSH tunnel rule: " + error).c_str(), "SSH Tunnels", MB_OK | MB_ICONWARNING);
+                return TRUE;
+            }
+            rules.push_back(std::move(rule));
+        }
+        if (end == std::string::npos)
+            break;
+        start = text.find_first_not_of("\r\n", end);
+        if (start == std::string::npos)
+            break;
+    }
+    std::string error;
+    if (!ValidateSshTunnelRules(rules, error)) {
+        MessageBoxA(hWnd, error.c_str(), "SSH Tunnels", MB_OK | MB_ICONWARNING);
+        return TRUE;
+    }
+    context->settings->sshTunnels = std::move(rules);
+    EndDialog(hWnd, IDOK);
+    return TRUE;
+}
+
+bool ShowSshTunnelDialog(HWND owner, pConnectSettings settings)
+{
+    TunnelDialogContext context{ settings };
+    return IDOK == ShowLocalizedDialogBoxParam(IDD_TUNNELS, owner, TunnelDlgProc, reinterpret_cast<LPARAM>(&context));
 }
 
 static ProxyDialogContext* GetProxyDialogContext(HWND hWnd)
@@ -2488,6 +2560,9 @@ INT_PTR ConnectionDialog::OnCommand(WPARAM wParam, LPARAM /*lParam*/)
     case IDC_JUMP_BUTTON:
         OnJumpButton();
         break;
+    case IDC_TUNNEL_BUTTON:
+        OnTunnelButton();
+        break;
     case IDC_JUMP_SESSION_PICK:
         if (HIWORD(wParam) == CBN_SELCHANGE)
             OnJumpSessionPicked();
@@ -2789,6 +2864,14 @@ void ConnectionDialog::OnOk()
             EncryptString(m_settings->jump_password.c_str(), jumpEnc.data(), static_cast<UINT>(jumpEnc.size()));
             WritePrivateProfileString(targetProfile.data(), "jumppassword", jumpEnc.data(), dlgIniFileName);
         }
+        for (unsigned index = 1; index <= 64; ++index) {
+            const std::string key = std::format("tunnel{}", index);
+            WritePrivateProfileString(targetProfile.data(), key.c_str(), nullptr, dlgIniFileName);
+        }
+        for (size_t index = 0; index < m_settings->sshTunnels.size() && index < 64; ++index) {
+            const std::string key = std::format("tunnel{}", index + 1);
+            WritePrivateProfileString(targetProfile.data(), key.c_str(), FormatSshTunnelRule(m_settings->sshTunnels[index]), dlgIniFileName);
+        }
         _itoa_s(m_settings->filemod, modbuf.data(), modbuf.size(), 8);
         WritePrivateProfileString(targetProfile.data(), "filemod", m_settings->filemod == 0644 ? nullptr : modbuf.data(), dlgIniFileName);
         _itoa_s(m_settings->dirmod, modbuf.data(), modbuf.size(), 8);
@@ -2942,6 +3025,12 @@ void ConnectionDialog::OnJumpButton()
     OnJumpButtonCommand(m_hWnd, m_settings, m_ctx->displayName, m_ctx->iniFileName);
     CheckDlgButton(m_hWnd, IDC_JUMP_ENABLE,
         m_settings->use_jump_host ? BST_CHECKED : BST_UNCHECKED);
+}
+
+void ConnectionDialog::OnTunnelButton()
+{
+    if (m_settings)
+        ShowSshTunnelDialog(m_hWnd, m_settings);
 }
 
 void ConnectionDialog::OnJumpSessionPicked()
@@ -3188,7 +3277,7 @@ pConnectSettings SftpConnectToServer(LPCSTR DisplayName, LPCSTR inifilename, LPC
                 auto* heap_cs = new tConnectSettings(std::move(ConnectSettings));
                 if (heap_cs->session)
                     *heap_cs->session->abstractPtr() = heap_cs;
-                StartSshKeepAlive(heap_cs);
+                StartSshSessionServices(heap_cs);
                 return heap_cs;
             } catch (const std::bad_alloc&) {
                 if (ConnectSettings.feedback) {

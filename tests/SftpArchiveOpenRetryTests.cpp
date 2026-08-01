@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "SftpArchiveOpenRetry.h"
+#include "SshTunnel.h"
 
 namespace {
 
@@ -38,12 +39,50 @@ bool TestEagainRetriesTheSameStagingPath()
         openedPaths[0] == stagingPath && openedPaths[1] == stagingPath && openedPaths[2] == stagingPath;
 }
 
+bool TestSshTunnelRules()
+{
+    struct Case {
+        const char* text;
+        SshTunnelType type;
+        bool start;
+        const char* bind;
+        unsigned short listen;
+        const char* target;
+        unsigned short targetPort;
+    };
+    const Case cases[] = {
+        { "+ -L 127.0.0.1:8080:app.internal:80", SshTunnelType::local, true, "127.0.0.1", 8080, "app.internal", 80 },
+        { "- -R 0.0.0.0:2222:127.0.0.1:22", SshTunnelType::remote, false, "0.0.0.0", 2222, "127.0.0.1", 22 },
+        { "+ -D [::1]:1080", SshTunnelType::dynamic, true, "::1", 1080, "", 0 },
+        { "+ -L 8443:[2001:db8::10]:443", SshTunnelType::local, true, "127.0.0.1", 8443, "2001:db8::10", 443 },
+    };
+    std::vector<SshTunnelRule> rules;
+    for (const Case& item : cases) {
+        SshTunnelRule rule;
+        std::string error;
+        if (!ParseSshTunnelRule(item.text, rule, error) || rule.type != item.type ||
+            rule.startOnConnect != item.start || rule.bindAddress != item.bind || rule.listenPort != item.listen ||
+            rule.targetHost != item.target || rule.targetPort != item.targetPort)
+            return false;
+        rules.push_back(std::move(rule));
+    }
+    std::string error;
+    SshTunnelRule invalid;
+    const std::vector<SshTunnelRule> defaults = DefaultSshTunnelRules();
+    return ValidateSshTunnelRules(rules, error) && defaults.size() == 3 &&
+           FormatSshTunnelRule(defaults[0]) == "- -L 0.0.0.0:2260:127.0.0.1:2260" &&
+           FormatSshTunnelRule(defaults[1]) == "- -R 0.0.0.0:1080:127.0.0.1:1080" &&
+           FormatSshTunnelRule(defaults[2]) == "- -D 0.0.0.0:1081" &&
+           !ParseSshTunnelRule("+ -D 0", invalid, error) &&
+           !ParseSshTunnelRule("+ -L 8080:missing-port", invalid, error);
+}
+
 } // namespace
 
 int main()
 {
-    if (TestEagainRetriesTheSameStagingPath())
+    if (TestEagainRetriesTheSameStagingPath() && TestSshTunnelRules())
         return 0;
-    std::fputs("EAGAIN retry changed the Windows archive staging path.\n", stderr);
+    std::fputs("SFTP archive retry or SSH tunnel rule test failed.\n", stderr);
     return 1;
 }

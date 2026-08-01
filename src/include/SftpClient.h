@@ -8,6 +8,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 #include "ServerRegistry.h"
 #include "CoreUtils.h"
 #include "ISshBackend.h"
@@ -15,6 +16,8 @@
 
 #include "LanPairSession.h"
 #include "ITransportStream.h"
+#include "SshTunnel.h"
+#include "SshTunnelManager.h"
 
 enum SftpResult : int
 {
@@ -164,6 +167,8 @@ struct tConnectSettings {
     WCHAR current_targetW[wdirtypemax];
     std::unique_ptr<IUserFeedback> feedback;
     std::shared_ptr<SshKeepAliveState> sshKeepAlive;
+    std::vector<SshTunnelRule> sshTunnels;
+    std::unique_ptr<SshTunnelManager> sshTunnelManager;
 };
 
 using pConnectSettings = tConnectSettings*;

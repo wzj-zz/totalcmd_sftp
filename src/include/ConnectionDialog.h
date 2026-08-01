@@ -7,6 +7,7 @@
 INT_PTR WINAPI ProxyDlgProc(HWND hWnd, UINT Message, WPARAM wParam, LPARAM lParam);
 INT_PTR WINAPI ConnectDlgProc(HWND hWnd, UINT Message, WPARAM wParam, LPARAM lParam);
 bool ShowConnectDialog(pConnectSettings ConnectSettings, LPCSTR DisplayName, LPCSTR inifilename);
+bool ShowSshTunnelDialog(HWND owner, pConnectSettings settings);
 void fillProxyCombobox(HWND hWnd, int defproxynr, LPCSTR iniFileName);
 
 // Helpers implemented in SftpConnection.cpp and used by dialog module.

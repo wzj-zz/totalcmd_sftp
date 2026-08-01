@@ -19,6 +19,7 @@ struct ISshSession;
 struct ISftpSession;
 struct ISftpHandle;
 struct ISshChannel;
+struct ISshForwardListener;
 struct ISshAgent;
 
 // ---------------------------------------------------------------------------
@@ -62,6 +63,13 @@ struct ISshChannel {
                            const char* modes, unsigned modesLen,
                            int width, int height,
                            int widthPx, int heightPx) = 0;
+};
+
+// ISshForwardListener wraps server-initiated SSH port forwarding (-R).
+struct ISshForwardListener {
+    virtual ~ISshForwardListener() = default;
+    virtual std::unique_ptr<ISshChannel> accept() = 0;
+    virtual int cancel() = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -156,6 +164,8 @@ struct ISshSession {
     virtual std::unique_ptr<ISshChannel> directTcpip(
         const char* host, int port,
         const char* shost, int sport) = 0;
+    virtual std::unique_ptr<ISshForwardListener> forwardListen(
+        const char* host, int port, int* boundPort, int queueMaxSize) = 0;
 
     virtual void** abstractPtr() = 0;
     virtual void* callbackSet(int cbtype, void* cb) = 0;

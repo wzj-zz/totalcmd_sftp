@@ -215,7 +215,10 @@ int WINAPI FsExecuteFileW(HWND MainWin, LPWSTR RemoteName, LPCWSTR Verb)
                         // Shell was stale (e.g. after PHP→SCP session switch). Reconnect once and retry.
                         SftpCloseConnection(serverid);
                         Sleep(500);
-                        if (SftpConnect(serverid) == SFTP_OK &&
+                        if (SftpConnect(serverid) == SFTP_OK) {
+                            StartSshSessionServices(serverid);
+                        }
+                        if (serverid->session &&
                             SftpLinkFolderTargetW(serverid, remotedir.data(), wdirtypemax - 1)) {
                             // fall through to success path below
                         } else {

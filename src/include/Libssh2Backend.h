@@ -65,6 +65,17 @@ private:
     LIBSSH2_CHANNEL* channel_;
 };
 
+class Libssh2ForwardListener : public ISshForwardListener {
+public:
+    explicit Libssh2ForwardListener(LIBSSH2_LISTENER* listener) : listener_(listener) {}
+    ~Libssh2ForwardListener() override;
+    std::unique_ptr<ISshChannel> accept() override;
+    int cancel() override;
+
+private:
+    LIBSSH2_LISTENER* listener_;
+};
+
 class Libssh2Agent : public ISshAgent {
 public:
     explicit Libssh2Agent(LIBSSH2_AGENT* a) : agent_(a) {}
@@ -159,6 +170,8 @@ public:
     std::unique_ptr<ISshChannel> directTcpip(
         const char* host, int port,
         const char* shost, int sport) override;
+    std::unique_ptr<ISshForwardListener> forwardListen(
+        const char* host, int port, int* boundPort, int queueMaxSize) override;
 
     void** abstractPtr() override;
     void* callbackSet(int cbtype, void* cb) override;

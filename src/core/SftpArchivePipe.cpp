@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <format>
 #include <mutex>
 #include <memory>
 #include <string>
@@ -36,6 +37,9 @@ constexpr DWORD kArchiveDeleteRemote = 8;
 constexpr DWORD kArchivePrewarmManifest = 9;
 constexpr DWORD kArchiveLogStatus = 10;
 constexpr DWORD kArchiveShowError = 11;
+constexpr DWORD kArchiveTunnelStatus = 12;
+constexpr DWORD kArchiveTunnelSetEnabled = 13;
+constexpr DWORD kArchiveTunnelReplaceRules = 14;
 constexpr DWORD kMaxPathBytes = 64 * 1024;
 constexpr DWORD kMaxItemBytes = 1024 * 1024;
 constexpr DWORD kChunkSize = 64 * 1024;
@@ -64,6 +68,48 @@ struct ManifestCache {
 
 std::mutex g_manifestMutex;
 std::unique_ptr<ManifestCache> g_manifestCache;
+
+bool SaveSshTunnelRules(pConnectSettings cs, std::string& error)
+{
+    if (!cs || cs->DisplayName.empty() || cs->IniFileName.empty()) {
+        error = "The active SFTP session cannot save tunnel rules.";
+        return false;
+    }
+    for (unsigned index = 1; index <= 64; ++index) {
+        const std::string key = std::format("tunnel{}", index);
+        WritePrivateProfileString(cs->DisplayName.c_str(), key.c_str(), nullptr, cs->IniFileName.c_str());
+    }
+    for (size_t index = 0; index < cs->sshTunnels.size() && index < 64; ++index) {
+        const std::string key = std::format("tunnel{}", index + 1);
+        WritePrivateProfileString(cs->DisplayName.c_str(), key.c_str(), FormatSshTunnelRule(cs->sshTunnels[index]).c_str(), cs->IniFileName.c_str());
+    }
+    return true;
+}
+
+bool ParseTunnelRuleLines(std::string_view text, std::vector<SshTunnelRule>& rules, std::string& error)
+{
+    rules.clear();
+    for (size_t start = 0; start < text.size();) {
+        const size_t end = text.find('\n', start);
+        std::string line(text.substr(start, (end == std::string_view::npos ? text.size() : end) - start));
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
+            line.pop_back();
+        if (!line.empty()) {
+            SshTunnelRule rule;
+            if (!ParseSshTunnelRule(line, rule, error))
+                return false;
+            rules.push_back(std::move(rule));
+            if (rules.size() > 64) {
+                error = "A session can contain at most 64 SSH tunnel rules.";
+                return false;
+            }
+        }
+        if (end == std::string_view::npos)
+            break;
+        start = end + 1;
+    }
+    return ValidateSshTunnelRules(rules, error);
+}
 
 bool ReadExact(HANDLE pipe, void* data, DWORD length)
 {
@@ -175,7 +221,10 @@ bool ReconnectArchiveSession(pConnectSettings cs)
     if (!cs || IsPhpAgentTransport(cs) || IsLanPairTransport(cs))
         return false;
     SftpCloseConnection(cs);
-    return SftpConnect(cs) == SFTP_OK && cs->session && (cs->scponly || cs->sftpsession);
+    if (SftpConnect(cs) != SFTP_OK || !cs->session || (!cs->scponly && !cs->sftpsession))
+        return false;
+    StartSshSessionServices(cs);
+    return true;
 }
 
 bool WaitForArchiveIo(pConnectSettings cs)
@@ -1226,6 +1275,81 @@ void ServeClient(HANDLE pipe)
             ok = true;
         } else {
             error = "Total Commander cannot display plugin error messages.";
+        }
+    } else if (request.operation == kArchiveTunnelStatus) {
+        RemoteEndpoint endpoint;
+        if (OpenEndpoint(sourcePath, endpoint, error)) {
+            ok = true;
+            const std::vector<bool> running = endpoint.cs->sshTunnelManager
+                ? endpoint.cs->sshTunnelManager->Running() : std::vector<bool>{};
+            if (ok) {
+                for (size_t index = 0; index < endpoint.cs->sshTunnels.size(); ++index) {
+                    const bool enabled = index < running.size() && running[index];
+                    error += enabled ? "1\t" : "0\t";
+                    error += FormatSshTunnelRule(endpoint.cs->sshTunnels[index]);
+                    error += '\n';
+                }
+            }
+        }
+    } else if (request.operation == kArchiveTunnelSetEnabled) {
+        RemoteEndpoint endpoint;
+        const size_t separator = items.find('|');
+        const std::string indexText = items.substr(0, separator);
+        const bool enabled = separator != std::string::npos && items.substr(separator + 1) == "1";
+        const unsigned long index = strtoul(indexText.c_str(), nullptr, 10);
+        if (!OpenEndpoint(sourcePath, endpoint, error)) {
+            // OpenEndpoint populated a useful active-session error.
+        } else if (separator == std::string::npos || index >= endpoint.cs->sshTunnels.size()) {
+            error = "Invalid SSH tunnel selection.";
+        } else {
+            if (!endpoint.cs->sshTunnelManager)
+                endpoint.cs->sshTunnelManager = std::make_unique<SshTunnelManager>(endpoint.cs);
+            ok = endpoint.cs->sshTunnelManager->SetEnabled(index, enabled, error);
+            if (ok) {
+                endpoint.cs->sshTunnels[index].startOnConnect = enabled;
+                ok = SaveSshTunnelRules(endpoint.cs, error);
+            }
+        }
+    } else if (request.operation == kArchiveTunnelReplaceRules) {
+        RemoteEndpoint endpoint;
+        std::vector<SshTunnelRule> rules;
+        if (!OpenEndpoint(sourcePath, endpoint, error)) {
+            // OpenEndpoint populated a useful active-session error.
+        } else if (!ParseTunnelRuleLines(items, rules, error)) {
+            // ParseTunnelRuleLines populated a useful validation error.
+        } else {
+            std::vector<SshTunnelRule> oldRules = endpoint.cs->sshTunnels;
+            if (endpoint.cs->sshTunnelManager)
+                endpoint.cs->sshTunnelManager.reset();
+            endpoint.cs->sshTunnels = std::move(rules);
+            ok = true;
+            if (!endpoint.cs->sshTunnels.empty()) {
+                endpoint.cs->sshTunnelManager = std::make_unique<SshTunnelManager>(endpoint.cs);
+                std::string tunnelError;
+                if (!endpoint.cs->sshTunnelManager->StartDefaults(tunnelError) && !tunnelError.empty()) {
+                    error = tunnelError;
+                    ok = false;
+                }
+            }
+            if (!ok) {
+                endpoint.cs->sshTunnelManager.reset();
+                endpoint.cs->sshTunnels = std::move(oldRules);
+                if (!endpoint.cs->sshTunnels.empty()) {
+                    endpoint.cs->sshTunnelManager = std::make_unique<SshTunnelManager>(endpoint.cs);
+                    std::string ignored;
+                    endpoint.cs->sshTunnelManager->StartDefaults(ignored);
+                }
+            }
+            if (ok && !SaveSshTunnelRules(endpoint.cs, error)) {
+                endpoint.cs->sshTunnelManager.reset();
+                endpoint.cs->sshTunnels = std::move(oldRules);
+                if (!endpoint.cs->sshTunnels.empty()) {
+                    endpoint.cs->sshTunnelManager = std::make_unique<SshTunnelManager>(endpoint.cs);
+                    std::string ignored;
+                    endpoint.cs->sshTunnelManager->StartDefaults(ignored);
+                }
+                ok = false;
+            }
         }
     } else {
         error = "Unsupported archive operation.";

@@ -172,6 +172,28 @@ void Libssh2Channel::setBlocking(int blocking)
     libssh2_channel_set_blocking(channel_, blocking);
 }
 
+Libssh2ForwardListener::~Libssh2ForwardListener()
+{
+    if (listener_)
+        libssh2_channel_forward_cancel(listener_);
+}
+
+std::unique_ptr<ISshChannel> Libssh2ForwardListener::accept()
+{
+    LIBSSH2_CHANNEL* channel = libssh2_channel_forward_accept(listener_);
+    return channel ? std::make_unique<Libssh2Channel>(channel) : nullptr;
+}
+
+int Libssh2ForwardListener::cancel()
+{
+    if (!listener_)
+        return 0;
+    const int rc = libssh2_channel_forward_cancel(listener_);
+    if (rc != LIBSSH2_ERROR_EAGAIN)
+        listener_ = nullptr;
+    return rc;
+}
+
 int Libssh2Channel::requestPty(const char* term, unsigned termLen,
                                 const char* modes, unsigned modesLen,
                                 int width, int height,
@@ -548,6 +570,14 @@ std::unique_ptr<ISshChannel> Libssh2Session::directTcpip(
     if (!ch)
         return nullptr;
     return std::make_unique<Libssh2Channel>(ch);
+}
+
+std::unique_ptr<ISshForwardListener> Libssh2Session::forwardListen(
+    const char* host, int port, int* boundPort, int queueMaxSize)
+{
+    LIBSSH2_LISTENER* listener = libssh2_channel_forward_listen_ex(
+        session_, host, port, boundPort, queueMaxSize);
+    return listener ? std::make_unique<Libssh2ForwardListener>(listener) : nullptr;
 }
 
 void* Libssh2Session::callbackSet(int cbtype, void* cb)

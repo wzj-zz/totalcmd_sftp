@@ -6,6 +6,7 @@
 #include "SftpInternal.h"
 #include "ConnectionDialog.h"
 #include "ProfileSettings.h"
+#include "SshTunnel.h"
 
 bool LoadProxySettingsFromNr(int proxynr, pConnectSettings ConnectResults, LPCSTR iniFileName)
 {
@@ -161,6 +162,17 @@ bool LoadServerSettings(LPCSTR DisplayName, pConnectSettings ConnectResults, LPC
     }
 
     ConnectResults->neednewchannel = false;
+    ConnectResults->sshTunnels.clear();
+    for (unsigned index = 1; index <= 64; ++index) {
+        const std::string key = std::format("tunnel{}", index);
+        std::array<char, 1024> value{};
+        if (!GetPrivateProfileString(DisplayName, key.c_str(), "", value.data(), value.size(), iniFileName))
+            continue;
+        SshTunnelRule rule;
+        std::string error;
+        if (ParseSshTunnelRule(value.data(), rule, error))
+            ConnectResults->sshTunnels.push_back(std::move(rule));
+    }
     std::array<char, MAX_PATH> sendCommandBuf{};
     GetPrivateProfileString(DisplayName, "sendcommand", "", sendCommandBuf.data(), sendCommandBuf.size() - 1, iniFileName);
     ConnectResults->connectsendcommand = sendCommandBuf.data();

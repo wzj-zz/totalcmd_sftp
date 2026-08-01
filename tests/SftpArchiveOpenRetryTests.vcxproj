@@ -36,6 +36,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="SftpArchiveOpenRetryTests.cpp" />
+    <ClCompile Include="..\src\core\SshTunnel.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

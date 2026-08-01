@@ -6,6 +6,8 @@
 #include <array>
 #include <atomic>
 #include <algorithm>
+#include <charconv>
+#include <cctype>
 #include <cwctype>
 #include <filesystem>
 #include <fstream>
@@ -31,6 +33,9 @@ constexpr DWORD kArchiveDeleteRemote = 8;
 constexpr DWORD kArchivePrewarmManifest = 9;
 constexpr DWORD kArchiveLogStatus = 10;
 constexpr DWORD kArchiveShowError = 11;
+constexpr DWORD kArchiveTunnelStatus = 12;
+constexpr DWORD kArchiveTunnelSetEnabled = 13;
+constexpr DWORD kArchiveTunnelReplaceRules = 14;
 constexpr DWORD kChunkSize = 64 * 1024;
 constexpr int kOperationCanceled = 3;
 
@@ -43,6 +48,10 @@ struct ArchiveRequest {
 };
 
 std::string ToUtf8(std::wstring_view text);
+std::wstring FromUtf8(std::string_view text);
+bool IsSftpVirtualPath(std::wstring_view path);
+bool ParseSftpPanelPath(const std::wstring& path, std::wstring& session, std::wstring& remotePath);
+std::wstring GetExecutableDirectory();
 HANDLE OpenArchivePipe();
 bool StartArchiveRequest(HANDLE pipe, DWORD operation, std::wstring_view sourcePath,
                          std::wstring_view targetPath, std::string_view items,
@@ -221,6 +230,558 @@ std::wstring TargetForPrompt(std::wstring target)
     if (target.size() >= 2 && (target.ends_with(L"\\.") || target.ends_with(L"/.")))
         target.pop_back();
     return target;
+}
+
+constexpr int kTunnelList = 1010;
+constexpr int kTunnelAdd = 1011;
+constexpr int kTunnelEdit = 1012;
+constexpr int kTunnelRemove = 1013;
+constexpr int kTunnelToggle = 1014;
+constexpr int kTunnelType = 1020;
+constexpr int kTunnelStart = 1021;
+constexpr int kTunnelBind = 1022;
+constexpr int kTunnelListen = 1023;
+constexpr int kTunnelTargetHost = 1024;
+constexpr int kTunnelTargetPort = 1025;
+
+enum class RouterTunnelType { local, remote, dynamic };
+
+struct RouterTunnelRule {
+    RouterTunnelType type = RouterTunnelType::local;
+    bool startOnConnect = false;
+    std::wstring bindAddress = L"0.0.0.0";
+    unsigned short listenPort = 0;
+    std::wstring targetHost;
+    unsigned short targetPort = 0;
+};
+
+struct TunnelPanelState {
+    std::wstring sourcePath;
+    bool offline = false;
+    std::vector<bool> running;
+    std::vector<RouterTunnelRule> rules;
+};
+
+struct TunnelEditState {
+    RouterTunnelRule rule;
+};
+
+std::wstring_view TrimTunnelText(std::wstring_view value)
+{
+    while (!value.empty() && iswspace(value.front()))
+        value.remove_prefix(1);
+    while (!value.empty() && iswspace(value.back()))
+        value.remove_suffix(1);
+    return value;
+}
+
+bool ParseTunnelPort(std::wstring_view text, unsigned short& port)
+{
+    text = TrimTunnelText(text);
+    std::string narrow = ToUtf8(text);
+    unsigned number = 0;
+    const auto [end, status] = std::from_chars(narrow.data(), narrow.data() + narrow.size(), number);
+    if (status != std::errc{} || end != narrow.data() + narrow.size() || number == 0 || number > 65535)
+        return false;
+    port = static_cast<unsigned short>(number);
+    return true;
+}
+
+bool SplitTunnelEndpoint(std::wstring_view text, std::vector<std::wstring_view>& parts)
+{
+    while (!text.empty()) {
+        if (text.front() == L'[') {
+            const size_t close = text.find(L']');
+            if (close == std::wstring_view::npos)
+                return false;
+            parts.push_back(text.substr(1, close - 1));
+            text.remove_prefix(close + 1);
+            if (text.empty())
+                return true;
+            if (text.front() != L':')
+                return false;
+            text.remove_prefix(1);
+            continue;
+        }
+        const size_t separator = text.find(L':');
+        parts.push_back(text.substr(0, separator));
+        if (separator == std::wstring_view::npos)
+            return true;
+        text.remove_prefix(separator + 1);
+    }
+    return false;
+}
+
+std::wstring FormatTunnelHost(std::wstring_view host)
+{
+    return host.find(L':') == std::wstring_view::npos ? std::wstring(host) : L"[" + std::wstring(host) + L"]";
+}
+
+std::string FormatTunnelRuleUtf8(const RouterTunnelRule& rule)
+{
+    const wchar_t kind = rule.type == RouterTunnelType::local ? L'L' : rule.type == RouterTunnelType::remote ? L'R' : L'D';
+    std::wstring text = std::wstring(rule.startOnConnect ? L"+ -" : L"- -") + kind + L" " +
+        FormatTunnelHost(rule.bindAddress) + L":" + std::to_wstring(rule.listenPort);
+    if (rule.type != RouterTunnelType::dynamic)
+        text += L":" + FormatTunnelHost(rule.targetHost) + L":" + std::to_wstring(rule.targetPort);
+    return ToUtf8(text);
+}
+
+std::wstring DescribeTunnelRule(const RouterTunnelRule& rule, bool running)
+{
+    std::wstring text = running ? L"Running  " : L"Stopped  ";
+    text += rule.startOnConnect ? L"[+] " : L"[-] ";
+    if (rule.type == RouterTunnelType::local) {
+        text += L"Local  " + rule.bindAddress + L":" + std::to_wstring(rule.listenPort) +
+            L" -> remote " + rule.targetHost + L":" + std::to_wstring(rule.targetPort);
+    } else if (rule.type == RouterTunnelType::remote) {
+        text += L"Remote " + rule.bindAddress + L":" + std::to_wstring(rule.listenPort) +
+            L" -> local " + rule.targetHost + L":" + std::to_wstring(rule.targetPort);
+    } else {
+        text += L"SOCKS5 " + rule.bindAddress + L":" + std::to_wstring(rule.listenPort);
+    }
+    return text;
+}
+
+RouterTunnelRule DefaultTunnelRule(RouterTunnelType type)
+{
+    RouterTunnelRule rule;
+    rule.type = type;
+    rule.bindAddress = L"0.0.0.0";
+    if (type == RouterTunnelType::local) {
+        rule.listenPort = 2260;
+        rule.targetHost = L"127.0.0.1";
+        rule.targetPort = 2260;
+    } else if (type == RouterTunnelType::remote) {
+        rule.listenPort = 1080;
+        rule.targetHost = L"127.0.0.1";
+        rule.targetPort = 1080;
+    } else {
+        rule.listenPort = 1081;
+    }
+    return rule;
+}
+
+bool ParseTunnelRule(std::wstring_view text, RouterTunnelRule& rule)
+{
+    text = TrimTunnelText(text);
+    if (text.size() < 4 || (text.front() != L'+' && text.front() != L'-') || text[1] != L' ' || text[2] != L'-')
+        return false;
+    rule = {};
+    rule.startOnConnect = text.front() == L'+';
+    const wchar_t kind = static_cast<wchar_t>(towupper(text[3]));
+    if ((kind != L'L' && kind != L'R' && kind != L'D') || (text.size() > 4 && !iswspace(text[4])))
+        return false;
+    rule.type = kind == L'L' ? RouterTunnelType::local : kind == L'R' ? RouterTunnelType::remote : RouterTunnelType::dynamic;
+    text = TrimTunnelText(text.substr(4));
+    std::vector<std::wstring_view> parts;
+    if (text.empty() || !SplitTunnelEndpoint(text, parts))
+        return false;
+    const size_t expected = rule.type == RouterTunnelType::dynamic ? 1 : 3;
+    if (parts.size() == expected + 1) {
+        rule.bindAddress = std::wstring(parts.front());
+        parts.erase(parts.begin());
+    } else if (parts.size() == expected) {
+        rule.bindAddress = L"127.0.0.1";
+    } else {
+        return false;
+    }
+    if (rule.bindAddress.empty() || !ParseTunnelPort(parts[0], rule.listenPort))
+        return false;
+    if (rule.type != RouterTunnelType::dynamic) {
+        if (parts[1].empty() || !ParseTunnelPort(parts[2], rule.targetPort))
+            return false;
+        rule.targetHost = std::wstring(parts[1]);
+    }
+    return true;
+}
+
+std::wstring GetDlgText(HWND dialog, int id)
+{
+    const int length = GetWindowTextLengthW(GetDlgItem(dialog, id));
+    std::wstring text(static_cast<size_t>(length) + 1, L'\0');
+    if (length > 0)
+        GetDlgItemTextW(dialog, id, text.data(), length + 1);
+    text.resize(static_cast<size_t>(length));
+    return std::wstring(TrimTunnelText(text));
+}
+
+void SetEditControlsForTunnelType(HWND dialog)
+{
+    const int selected = static_cast<int>(SendDlgItemMessageW(dialog, kTunnelType, CB_GETCURSEL, 0, 0));
+    const bool dynamic = selected == 2;
+    EnableWindow(GetDlgItem(dialog, kTunnelTargetHost), !dynamic);
+    EnableWindow(GetDlgItem(dialog, kTunnelTargetPort), !dynamic);
+}
+
+INT_PTR CALLBACK TunnelEditProc(HWND dialog, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    if (message == WM_INITDIALOG) {
+        auto* state = reinterpret_cast<TunnelEditState*>(lParam);
+        SetWindowLongPtrW(dialog, DWLP_USER, lParam);
+        SendDlgItemMessageW(dialog, kTunnelType, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Local (-L)"));
+        SendDlgItemMessageW(dialog, kTunnelType, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Remote (-R)"));
+        SendDlgItemMessageW(dialog, kTunnelType, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Dynamic SOCKS5 (-D)"));
+        const int typeIndex = state->rule.type == RouterTunnelType::local ? 0 : state->rule.type == RouterTunnelType::remote ? 1 : 2;
+        SendDlgItemMessageW(dialog, kTunnelType, CB_SETCURSEL, typeIndex, 0);
+        CheckDlgButton(dialog, kTunnelStart, state->rule.startOnConnect ? BST_CHECKED : BST_UNCHECKED);
+        SetDlgItemTextW(dialog, kTunnelBind, state->rule.bindAddress.c_str());
+        SetDlgItemTextW(dialog, kTunnelListen, std::to_wstring(state->rule.listenPort).c_str());
+        SetDlgItemTextW(dialog, kTunnelTargetHost, state->rule.targetHost.c_str());
+        SetDlgItemTextW(dialog, kTunnelTargetPort, state->rule.targetPort ? std::to_wstring(state->rule.targetPort).c_str() : L"");
+        SetEditControlsForTunnelType(dialog);
+        return TRUE;
+    }
+    if (message != WM_COMMAND)
+        return FALSE;
+    if (LOWORD(wParam) == kTunnelType && HIWORD(wParam) == CBN_SELCHANGE) {
+        const int selected = static_cast<int>(SendDlgItemMessageW(dialog, kTunnelType, CB_GETCURSEL, 0, 0));
+        auto* state = reinterpret_cast<TunnelEditState*>(GetWindowLongPtrW(dialog, DWLP_USER));
+        if (state && selected >= 0) {
+            const RouterTunnelType type = selected == 0 ? RouterTunnelType::local : selected == 1 ? RouterTunnelType::remote : RouterTunnelType::dynamic;
+            const RouterTunnelRule defaults = DefaultTunnelRule(type);
+            SetDlgItemTextW(dialog, kTunnelBind, defaults.bindAddress.c_str());
+            SetDlgItemTextW(dialog, kTunnelListen, std::to_wstring(defaults.listenPort).c_str());
+            SetDlgItemTextW(dialog, kTunnelTargetHost, defaults.targetHost.c_str());
+            SetDlgItemTextW(dialog, kTunnelTargetPort, defaults.targetPort ? std::to_wstring(defaults.targetPort).c_str() : L"");
+        }
+        SetEditControlsForTunnelType(dialog);
+        return TRUE;
+    }
+    if (LOWORD(wParam) == IDCANCEL) {
+        EndDialog(dialog, IDCANCEL);
+        return TRUE;
+    }
+    if (LOWORD(wParam) != IDOK)
+        return FALSE;
+    auto* state = reinterpret_cast<TunnelEditState*>(GetWindowLongPtrW(dialog, DWLP_USER));
+    if (!state)
+        return TRUE;
+    RouterTunnelRule rule;
+    const int selected = static_cast<int>(SendDlgItemMessageW(dialog, kTunnelType, CB_GETCURSEL, 0, 0));
+    rule.type = selected == 0 ? RouterTunnelType::local : selected == 1 ? RouterTunnelType::remote : RouterTunnelType::dynamic;
+    rule.startOnConnect = IsDlgButtonChecked(dialog, kTunnelStart) == BST_CHECKED;
+    rule.bindAddress = GetDlgText(dialog, kTunnelBind);
+    if (rule.bindAddress.empty() || !ParseTunnelPort(GetDlgText(dialog, kTunnelListen), rule.listenPort)) {
+        MessageBoxW(dialog, L"Enter a valid listen address and port.", L"SSH Tunnels", MB_OK | MB_ICONWARNING);
+        return TRUE;
+    }
+    if (rule.type != RouterTunnelType::dynamic) {
+        rule.targetHost = GetDlgText(dialog, kTunnelTargetHost);
+        if (rule.targetHost.empty() || !ParseTunnelPort(GetDlgText(dialog, kTunnelTargetPort), rule.targetPort)) {
+            MessageBoxW(dialog, L"Enter a valid target host and port.", L"SSH Tunnels", MB_OK | MB_ICONWARNING);
+            return TRUE;
+        }
+    }
+    state->rule = std::move(rule);
+    EndDialog(dialog, IDOK);
+    return TRUE;
+}
+
+bool ShowTunnelEditDialog(HWND owner, RouterTunnelRule& rule)
+{
+    TunnelEditState state{ rule };
+    alignas(DWORD) std::array<BYTE, 3072> templateBytes{};
+    BYTE* cursor = templateBytes.data();
+    auto* header = reinterpret_cast<DLGTEMPLATE*>(cursor);
+    header->style = WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_SHELLFONT;
+    header->dwExtendedStyle = 0;
+    header->cdit = 14;
+    header->x = 10; header->y = 10; header->cx = 260; header->cy = 188;
+    cursor += sizeof(*header);
+    AppendDialogWord(cursor, 0); AppendDialogWord(cursor, 0); AppendDialogText(cursor, L"SSH Tunnel Rule");
+    AppendDialogWord(cursor, 9); AppendDialogText(cursor, L"Segoe UI");
+    AppendDialogItem(cursor, 10, 10, 70, 10, 2000, WS_CHILD | WS_VISIBLE, 0x0082, L"Type:");
+    AppendDialogItem(cursor, 84, 8, 160, 120, kTunnelType, WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, 0x0085, L"");
+    AppendDialogItem(cursor, 84, 30, 160, 12, kTunnelStart, WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0x0080, L"Enable now and on connect");
+    AppendDialogItem(cursor, 10, 53, 70, 10, 2001, WS_CHILD | WS_VISIBLE, 0x0082, L"Listen address:");
+    AppendDialogItem(cursor, 84, 50, 160, 14, kTunnelBind, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, 0x0081, L"");
+    AppendDialogItem(cursor, 10, 73, 70, 10, 2002, WS_CHILD | WS_VISIBLE, 0x0082, L"Listen port:");
+    AppendDialogItem(cursor, 84, 70, 70, 14, kTunnelListen, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 0x0081, L"");
+    AppendDialogItem(cursor, 10, 96, 70, 10, 2003, WS_CHILD | WS_VISIBLE, 0x0082, L"Target host:");
+    AppendDialogItem(cursor, 84, 93, 160, 14, kTunnelTargetHost, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, 0x0081, L"");
+    AppendDialogItem(cursor, 10, 116, 70, 10, 2004, WS_CHILD | WS_VISIBLE, 0x0082, L"Target port:");
+    AppendDialogItem(cursor, 84, 113, 70, 14, kTunnelTargetPort, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 0x0081, L"");
+    AppendDialogItem(cursor, 10, 137, 234, 18, 2005, WS_CHILD | WS_VISIBLE, 0x0082,
+                     L"0.0.0.0 accepts connections from other devices; use 127.0.0.1 for local only.");
+    AppendDialogItem(cursor, 78, 163, 78, 16, IDOK, WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 0x0080, L"OK");
+    AppendDialogItem(cursor, 166, 163, 78, 16, IDCANCEL, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0x0080, L"Cancel");
+    if (DialogBoxIndirectParamW(GetModuleHandleW(nullptr), header, owner, TunnelEditProc,
+                                reinterpret_cast<LPARAM>(&state)) != IDOK)
+        return false;
+    rule = std::move(state.rule);
+    return true;
+}
+
+void RefreshTunnelList(HWND dialog, TunnelPanelState* state)
+{
+    SendDlgItemMessageW(dialog, kTunnelList, LB_RESETCONTENT, 0, 0);
+    for (size_t index = 0; index < state->rules.size(); ++index) {
+        const bool running = index < state->running.size() && state->running[index];
+        const std::wstring row = DescribeTunnelRule(state->rules[index], running);
+        SendDlgItemMessageW(dialog, kTunnelList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(row.c_str()));
+    }
+}
+
+bool GetTunnelIniContext(const std::wstring& sourcePath, std::wstring& iniPath, std::wstring& session, std::wstring& error)
+{
+    std::wstring remotePath;
+    if (!ParseSftpPanelPath(sourcePath, session, remotePath)) {
+        error = L"Could not determine the SFTP session from the active panel path.";
+        return false;
+    }
+    const std::filesystem::path tcDirectory = std::filesystem::path(GetExecutableDirectory()).parent_path().parent_path().parent_path();
+    iniPath = (tcDirectory / L"sftpplug.ini").wstring();
+    return true;
+}
+
+bool LoadTunnelStatusOffline(const std::wstring& sourcePath, TunnelPanelState& state, std::wstring& error)
+{
+    std::wstring iniPath;
+    std::wstring session;
+    if (!GetTunnelIniContext(sourcePath, iniPath, session, error))
+        return false;
+    state.offline = true;
+    state.running.clear();
+    state.rules.clear();
+    for (unsigned index = 1; index <= 64; ++index) {
+        const std::wstring key = L"tunnel" + std::to_wstring(index);
+        std::array<wchar_t, 2048> value{};
+        const DWORD length = GetPrivateProfileStringW(session.c_str(), key.c_str(), L"", value.data(),
+                                                       static_cast<DWORD>(value.size()), iniPath.c_str());
+        if (length == 0)
+            continue;
+        RouterTunnelRule rule;
+        if (ParseTunnelRule(std::wstring_view(value.data(), length), rule)) {
+            state.running.push_back(false);
+            state.rules.push_back(std::move(rule));
+        }
+    }
+    return true;
+}
+
+bool LoadTunnelStatus(const std::wstring& sourcePath, TunnelPanelState& state, std::wstring& error)
+{
+    HANDLE pipe = OpenArchivePipe();
+    if (pipe == INVALID_HANDLE_VALUE)
+        return LoadTunnelStatusOffline(sourcePath, state, error);
+    std::string status;
+    const bool ok = StartArchiveRequest(pipe, kArchiveTunnelStatus, sourcePath, L"", "", status);
+    CloseHandle(pipe);
+    if (!ok)
+        return LoadTunnelStatusOffline(sourcePath, state, error);
+    state.offline = false;
+    state.running.clear();
+    state.rules.clear();
+    size_t start = 0;
+    while (start < status.size()) {
+        const size_t end = status.find('\n', start);
+        const std::string_view row(status.data() + start, (end == std::string::npos ? status.size() : end) - start);
+        if (row.size() > 2 && (row[0] == '0' || row[0] == '1') && row[1] == '\t') {
+            RouterTunnelRule rule;
+            if (ParseTunnelRule(FromUtf8(row.substr(2)), rule)) {
+                state.running.push_back(row[0] == '1');
+                state.rules.push_back(std::move(rule));
+            }
+        }
+        if (end == std::string::npos)
+            break;
+        start = end + 1;
+    }
+    return true;
+}
+
+bool SaveTunnelRulesOffline(const std::wstring& sourcePath, const std::vector<RouterTunnelRule>& rules, std::wstring& error)
+{
+    std::wstring iniPath;
+    std::wstring session;
+    if (!GetTunnelIniContext(sourcePath, iniPath, session, error))
+        return false;
+    for (unsigned index = 1; index <= 64; ++index) {
+        const std::wstring key = L"tunnel" + std::to_wstring(index);
+        WritePrivateProfileStringW(session.c_str(), key.c_str(), nullptr, iniPath.c_str());
+    }
+    for (size_t index = 0; index < rules.size() && index < 64; ++index) {
+        const std::wstring key = L"tunnel" + std::to_wstring(index + 1);
+        const std::wstring value = FromUtf8(FormatTunnelRuleUtf8(rules[index]));
+        WritePrivateProfileStringW(session.c_str(), key.c_str(), value.c_str(), iniPath.c_str());
+    }
+    return true;
+}
+
+bool SaveTunnelRules(TunnelPanelState& state, const std::vector<RouterTunnelRule>& rules, std::wstring& error)
+{
+    if (state.offline)
+        return SaveTunnelRulesOffline(state.sourcePath, rules, error);
+    std::string request;
+    for (const RouterTunnelRule& rule : rules) {
+        request += FormatTunnelRuleUtf8(rule);
+        request += '\n';
+    }
+    HANDLE pipe = OpenArchivePipe();
+    if (pipe == INVALID_HANDLE_VALUE) {
+        error = L"The active SFTP session is unavailable.";
+        return false;
+    }
+    std::string response;
+    const bool ok = StartArchiveRequest(pipe, kArchiveTunnelReplaceRules, state.sourcePath, L"", request, response);
+    CloseHandle(pipe);
+    if (!ok)
+        error = FromUtf8(response.empty() ? "Could not save SSH tunnel rules." : response);
+    return ok;
+}
+
+bool SetTunnelEnabled(TunnelPanelState& state, size_t index, bool enabled, std::wstring& error)
+{
+    if (state.offline) {
+        if (index >= state.rules.size()) {
+            error = L"Invalid SSH tunnel selection.";
+            return false;
+        }
+        auto rules = state.rules;
+        rules[index].startOnConnect = enabled;
+        return SaveTunnelRulesOffline(state.sourcePath, rules, error);
+    }
+    HANDLE pipe = OpenArchivePipe();
+    if (pipe == INVALID_HANDLE_VALUE) {
+        error = L"The active SFTP session is unavailable.";
+        return false;
+    }
+    std::string response;
+    const std::string request = std::to_string(index) + (enabled ? "|1" : "|0");
+    const bool ok = StartArchiveRequest(pipe, kArchiveTunnelSetEnabled, state.sourcePath, L"", request, response);
+    CloseHandle(pipe);
+    if (!ok)
+        error = FromUtf8(response.empty() ? "Could not update the SSH tunnel." : response);
+    return ok;
+}
+
+INT_PTR CALLBACK TunnelPanelProc(HWND dialog, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    if (message == WM_INITDIALOG) {
+        auto* state = reinterpret_cast<TunnelPanelState*>(lParam);
+        SetWindowLongPtrW(dialog, DWLP_USER, lParam);
+        RefreshTunnelList(dialog, state);
+        return TRUE;
+    }
+    if (message != WM_COMMAND)
+        return FALSE;
+    if (LOWORD(wParam) == IDCANCEL || LOWORD(wParam) == IDOK) {
+        EndDialog(dialog, IDOK);
+        return TRUE;
+    }
+    if (LOWORD(wParam) == kTunnelList && HIWORD(wParam) != LBN_DBLCLK)
+        return TRUE;
+    auto* state = reinterpret_cast<TunnelPanelState*>(GetWindowLongPtrW(dialog, DWLP_USER));
+    if (!state)
+        return TRUE;
+    auto selectedIndex = [&]() -> int {
+        return static_cast<int>(SendDlgItemMessageW(dialog, kTunnelList, LB_GETCURSEL, 0, 0));
+    };
+    if (LOWORD(wParam) == kTunnelAdd) {
+        RouterTunnelRule rule = DefaultTunnelRule(RouterTunnelType::local);
+        if (!ShowTunnelEditDialog(dialog, rule))
+            return TRUE;
+        auto rules = state->rules;
+        rules.push_back(std::move(rule));
+        std::wstring error;
+        if (!SaveTunnelRules(*state, rules, error) || !LoadTunnelStatus(state->sourcePath, *state, error)) {
+            MessageBoxW(dialog, error.c_str(), L"SSH Tunnels", MB_OK | MB_ICONERROR);
+            return TRUE;
+        }
+        RefreshTunnelList(dialog, state);
+        return TRUE;
+    }
+    const int index = selectedIndex();
+    if (index < 0 || static_cast<size_t>(index) >= state->rules.size()) {
+        MessageBoxW(dialog, L"Select a tunnel rule first.", L"SSH Tunnels", MB_OK | MB_ICONINFORMATION);
+        return TRUE;
+    }
+    if (LOWORD(wParam) == kTunnelEdit) {
+        RouterTunnelRule rule = state->rules[static_cast<size_t>(index)];
+        if (!ShowTunnelEditDialog(dialog, rule))
+            return TRUE;
+        auto rules = state->rules;
+        rules[static_cast<size_t>(index)] = std::move(rule);
+        std::wstring error;
+        if (!SaveTunnelRules(*state, rules, error) || !LoadTunnelStatus(state->sourcePath, *state, error)) {
+            MessageBoxW(dialog, error.c_str(), L"SSH Tunnels", MB_OK | MB_ICONERROR);
+            return TRUE;
+        }
+        RefreshTunnelList(dialog, state);
+        SendDlgItemMessageW(dialog, kTunnelList, LB_SETCURSEL, index, 0);
+        return TRUE;
+    }
+    if (LOWORD(wParam) == kTunnelRemove) {
+        if (MessageBoxW(dialog, L"Remove the selected tunnel rule?", L"SSH Tunnels", MB_YESNO | MB_ICONQUESTION) != IDYES)
+            return TRUE;
+        auto rules = state->rules;
+        rules.erase(rules.begin() + index);
+        std::wstring error;
+        if (!SaveTunnelRules(*state, rules, error) || !LoadTunnelStatus(state->sourcePath, *state, error)) {
+            MessageBoxW(dialog, error.c_str(), L"SSH Tunnels", MB_OK | MB_ICONERROR);
+            return TRUE;
+        }
+        RefreshTunnelList(dialog, state);
+        return TRUE;
+    }
+    if (LOWORD(wParam) == kTunnelToggle || (LOWORD(wParam) == kTunnelList && HIWORD(wParam) == LBN_DBLCLK)) {
+        const bool running = static_cast<size_t>(index) < state->running.size() && state->running[static_cast<size_t>(index)];
+        const bool enabled = state->offline ? state->rules[static_cast<size_t>(index)].startOnConnect : running;
+        std::wstring error;
+        if (!SetTunnelEnabled(*state, static_cast<size_t>(index), !enabled, error) ||
+            !LoadTunnelStatus(state->sourcePath, *state, error)) {
+            MessageBoxW(dialog, error.c_str(), L"SSH Tunnels", MB_OK | MB_ICONERROR);
+            return TRUE;
+        }
+        RefreshTunnelList(dialog, state);
+        SendDlgItemMessageW(dialog, kTunnelList, LB_SETCURSEL, index, 0);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+int ManageTunnels(const std::wstring& sourcePath)
+{
+    if (!IsSftpVirtualPath(sourcePath)) {
+        ShowError(L"Ctrl+P SSH tunnel management is available only in an SFTP panel.");
+        return 2;
+    }
+    TunnelPanelState state;
+    state.sourcePath = sourcePath;
+    std::wstring error;
+    if (!LoadTunnelStatus(sourcePath, state, error)) {
+        ShowError(error);
+        return 1;
+    }
+    alignas(DWORD) std::array<BYTE, 2048> templateBytes{};
+    BYTE* cursor = templateBytes.data();
+    auto* header = reinterpret_cast<DLGTEMPLATE*>(cursor);
+    header->style = WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_SHELLFONT;
+    header->dwExtendedStyle = 0;
+    header->cdit = 8;
+    header->x = 10; header->y = 10; header->cx = 440; header->cy = 180;
+    cursor += sizeof(*header);
+    AppendDialogWord(cursor, 0); AppendDialogWord(cursor, 0); AppendDialogText(cursor, L"SSH Tunnels");
+    AppendDialogWord(cursor, 9); AppendDialogText(cursor, L"Segoe UI");
+    AppendDialogItem(cursor, 10, 8, 420, 18, 1000, WS_CHILD | WS_VISIBLE, 0x0082,
+                     L"Manage tunnel rules for this SFTP connection. Enable/disable is saved for next connect.");
+    AppendDialogItem(cursor, 10, 28, 420, 100, kTunnelList,
+                     WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
+                      0x0083, L"");
+    AppendDialogItem(cursor, 10, 138, 70, 16, kTunnelAdd, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0x0080, L"Add...");
+    AppendDialogItem(cursor, 88, 138, 70, 16, kTunnelEdit, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0x0080, L"Edit...");
+    AppendDialogItem(cursor, 166, 138, 70, 16, kTunnelRemove, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0x0080, L"Remove");
+    AppendDialogItem(cursor, 244, 138, 82, 16, kTunnelToggle, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0x0080, L"Enable/Disable");
+    AppendDialogItem(cursor, 340, 156, 90, 16, IDOK, WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 0x0080, L"Close");
+    AppendDialogItem(cursor, 10, 160, 300, 10, 1001, WS_CHILD | WS_VISIBLE, 0x0082,
+                     L"Double-click a rule to toggle it immediately.");
+    if (DialogBoxIndirectParamW(GetModuleHandleW(nullptr), header, FindTotalCommanderWindow(), TunnelPanelProc,
+                                reinterpret_cast<LPARAM>(&state)) == -1) {
+        ShowError(L"Could not show SSH tunnel management.");
+        return 1;
+    }
+    return 0;
 }
 
 std::wstring NormalizeLocalDirectory(std::wstring path)
@@ -1792,6 +2353,7 @@ bool InitializePortableRouter(bool quiet = false)
         { L"em_SftpOpenTerminal", L"terminal \"%P.\"" },
         { L"em_SftpOpenWindowsTerminalTab", L"terminal-wt tab \"%P.\"" },
         { L"em_SftpSplitWindowsTerminal", L"terminal-wt split \"%P.\"" },
+        { L"em_SftpManageTunnels", L"tunnels \"%P.\"" },
     };
     const wchar_t* const shortcuts[][2] = {
         { L"A+F5", L"em_SftpArchivePack" }, { L"A+F6", L"em_SftpArchiveUnpack" },
@@ -1799,6 +2361,7 @@ bool InitializePortableRouter(bool quiet = false)
         { L"A+F9", L"em_SftpRemoteDelete" }, { L"A+F11", L"em_SftpPrewarmManifest" },
         { L"A+F12", L"em_SftpLocalDiff" }, { L"C+G", L"em_SftpOpenTerminal" },
         { L"CAS+G", L"em_SftpOpenWindowsTerminalTab" }, { L"AS+G", L"em_SftpSplitWindowsTerminal" },
+        { L"C+P", L"em_SftpManageTunnels" },
     };
     constexpr wchar_t kRouterCommand[] = L"%COMMANDER_PATH%\\Plugins\\Wfx\\SFTP\\SftpArchiveRouter.exe";
     std::wstring error;
@@ -1822,7 +2385,7 @@ bool InitializePortableRouter(bool quiet = false)
         return false;
     }
     if (!quiet) {
-        ShowRouterMessage(L"Registered Ctrl+G console launch, Ctrl+Alt+Shift+G Windows Terminal tabs, Alt+Shift+G Windows Terminal splits, and Alt+F5 through Alt+F9, Alt+F11, and Alt+F12 SFTP operations. Restart Total Commander to apply them.",
+        ShowRouterMessage(L"Registered Ctrl+G console launch, Ctrl+P SSH tunnel management, Ctrl+Alt+Shift+G Windows Terminal tabs, Alt+Shift+G Windows Terminal splits, and Alt+F5 through Alt+F9, Alt+F11, and Alt+F12 SFTP operations. Restart Total Commander to apply them.",
                           L"SFTP Archive Router", MB_OK | MB_ICONINFORMATION);
     }
     return true;
@@ -2050,7 +2613,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (!argv || argc < 2) {
-        ShowError(L"Usage: SftpArchiveRouter.exe init [-y]\n       SftpArchiveRouter.exe terminal <source-path>\n       SftpArchiveRouter.exe terminal-wt <tab|split> <source-path>\n       SftpArchiveRouter.exe prewarm <source-path>\n       SftpArchiveRouter.exe localdiff <source-path> <target-path>\n       SftpArchiveRouter.exe copy|move|delete|pack|unpack <source-path> <target-path> <selected-list>");
+        ShowError(L"Usage: SftpArchiveRouter.exe init [-y]\n       SftpArchiveRouter.exe terminal <source-path>\n       SftpArchiveRouter.exe terminal-wt <tab|split> <source-path>\n       SftpArchiveRouter.exe tunnels <source-path>\n       SftpArchiveRouter.exe prewarm <source-path>\n       SftpArchiveRouter.exe localdiff <source-path> <target-path>\n       SftpArchiveRouter.exe copy|move|delete|pack|unpack <source-path> <target-path> <selected-list>");
         if (argv) LocalFree(argv);
         return 2;
     }
@@ -2133,6 +2696,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         LocalFree(argv);
         if (operation == L"terminal")
             return OpenTerminal(sourcePath) ? 0 : 1;
+        if (operation == L"tunnels")
+            return ManageTunnels(sourcePath);
         if (operation == L"prewarm")
             return FinishSftpOperation(sourcePath, L"", L"Prewarm", L"Alt+F11", Prewarm(sourcePath));
         ShowError(L"Unknown archive router command.");

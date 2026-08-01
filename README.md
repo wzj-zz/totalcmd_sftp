@@ -41,8 +41,31 @@ Total Commander WFX API
 | `Alt+F9` | Batch-delete selected SFTP files and directories with one remote `rm -rf` command. |
 | `Alt+F11` | Prewarm the current SFTP directory tree for faster native sync directory comparison. |
 | `Alt+F12` | Mirror SFTP panel directories to temporary local folders and open TC's local Synchronize Directories view. |
+| `Ctrl+P` | Manage SSH Local (`-L`), Remote (`-R`), and Dynamic SOCKS5 (`-D`) tunnels for the active SFTP session. |
 
 The router shows a target input before each SFTP TAR operation. Pack operations default to the generated `.tar` filename; copy, move, and unpack default to the target directory. Press Enter to use the default or edit the target before continuing. Native `F5` and `F6` remain unchanged. TAR streaming requires an active SSH/SFTP session and remote `tar`; PHP Agent and LAN Pair connections are unsupported. `Alt+F6` requires `7z.exe` in `PATH` or `C:\Program Files\7-Zip`.
+
+## SSH Tunnels
+
+Use **Tunnels...** in a connection's settings to enter one rule per line. `+` starts that rule after the SSH/SFTP session connects; `-` stores it disabled. `Ctrl+P` opens a per-session manager that can add, edit, remove, enable, and disable rules without reconnecting. Enable/disable changes are saved back to the session and reused on the next connect.
+
+The `Ctrl+P` **Add...** dialog has built-in Local, Remote, and Dynamic SOCKS5 templates:
+
+```text
+- -L 0.0.0.0:2260:127.0.0.1:2260
+- -R 0.0.0.0:1080:127.0.0.1:1080
+- -D 0.0.0.0:1081
+```
+
+Profiles do not receive tunnel rules automatically. Add only the templates you need, then toggle them on or off for the current and future connections.
+
+```text
++ -L 127.0.0.1:8080:app.internal:80
+- -R 0.0.0.0:2222:127.0.0.1:22
++ -D [::1]:1080
+```
+
+`-L` and `-R` use `[bind_address:]listen_port:target_host:target_port`; `-D` uses `[bind_address:]listen_port`. Bracket IPv6 addresses, for example `[::1]`. Remote listeners may use any address allowed by the SSH server. SSH keepalive is equivalent to `ServerAliveInterval=30`, `ServerAliveCountMax=120`, and `TCPKeepAlive=yes`.
 
 `Alt+F11` runs one remote `find` command for the current SFTP directory tree and holds its names, sizes, and modification times in memory for ten minutes. Total Commander still performs its normal sync directory compare, patch selection, and copy operations through the WFX API. The cache is dropped after a successful remote write, rename, delete, move, or disconnect.
 

@@ -66,6 +66,7 @@ struct SshKeepAliveState {
     std::condition_variable workerCv;
     std::thread worker;
     std::atomic<bool> stop{ false };
+    unsigned unanswered = 0;
     pConnectSettings owner = nullptr;
 };
 
@@ -99,6 +100,13 @@ static void SshKeepAliveWorker(const std::shared_ptr<SshKeepAliveState>& state)
             if (rc != LIBSSH2_ERROR_EAGAIN)
                 break;
             WaitForSshIo(cs, SOCKET_POLL_MS);
+        }
+        if (rc == LIBSSH2_ERROR_NONE) {
+            state->unanswered = 0;
+        } else if (++state->unanswered >= SSH_KEEPALIVE_COUNT_MAX) {
+            // Match OpenSSH's ServerAliveCountMax: stop sending probes after
+            // 120 consecutive failures and let the normal reconnect path run.
+            state->stop.store(true, std::memory_order_release);
         }
         state->sessionMutex.unlock();
     }
@@ -305,6 +313,7 @@ void StartSshKeepAlive(pConnectSettings cs) noexcept
         std::lock_guard<std::mutex> lock(state->workerMutex);
         state->owner = cs;
         state->stop.store(false, std::memory_order_release);
+        state->unanswered = 0;
         if (state->worker.joinable())
             return;
     }
@@ -312,6 +321,28 @@ void StartSshKeepAlive(pConnectSettings cs) noexcept
     state->worker = std::thread([state] {
         SshKeepAliveWorker(state);
     });
+}
+
+void StartSshSessionServices(pConnectSettings cs) noexcept
+{
+    if (!cs || !cs->session || IsLanPairTransport(cs) || IsPhpAgentTransport(cs))
+        return;
+
+    StartSshKeepAlive(cs);
+    if (cs->sshTunnelManager || cs->sshTunnels.empty())
+        return;
+
+    try {
+        cs->sshTunnelManager = std::make_unique<SshTunnelManager>(cs);
+        std::string tunnelError;
+        if (!cs->sshTunnelManager->StartDefaults(tunnelError) && LogProc) {
+            const std::string message = "SFTP tunnel startup failed: " + tunnelError;
+            LogProc(PluginNumber, MSGTYPE_IMPORTANTERROR, message.c_str());
+        }
+    } catch (const std::bad_alloc&) {
+        if (LogProc)
+            LogProc(PluginNumber, MSGTYPE_IMPORTANTERROR, "SFTP tunnel startup failed: out of memory");
+    }
 }
 
 void StopSshKeepAlive(pConnectSettings cs) noexcept
@@ -874,9 +905,6 @@ int SftpConnect(pConnectSettings ConnectSettings)
     if (ProgressProc(PluginNumber, buf.data(), "-", progress))
         return fail(SFTP_FAILED);
 
-    if (ConnectSettings->sshKeepAlive)
-        StartSshKeepAlive(ConnectSettings);
-
     CONN_LOG("SftpConnect success");
     return SFTP_OK;
 }
@@ -919,6 +947,7 @@ int SftpCloseConnection(pConnectSettings ConnectSettings)
     if (!ConnectSettings)
         return SFTP_FAILED;
     InvalidateSftpManifestCache(ConnectSettings);
+    ConnectSettings->sshTunnelManager.reset();
     ScopedSshSessionUse _sessionUse(ConnectSettings);
 
     // 1. LAN Pair (own transport, not SSH) — quick disconnect.
@@ -999,7 +1028,8 @@ bool ReconnectSFTPChannelIfNeeded(pConnectSettings ConnectSettings)
             ShowStatusId(IDS_LOG_SCP_RECONNECT, nullptr, true);
             SftpCloseConnection(ConnectSettings);
             Sleep(RECONNECT_SLEEP_MS);
-            SftpConnect(ConnectSettings);
+            if (SftpConnect(ConnectSettings) == SFTP_OK)
+                StartSshSessionServices(ConnectSettings);
             CONN_LOG("ReconnectSFTP(SCP): after reconnect session=%s",
                      ConnectSettings->session ? "OK" : "FAILED");
         }
@@ -1014,7 +1044,8 @@ bool ReconnectSFTPChannelIfNeeded(pConnectSettings ConnectSettings)
         ShowStatusId(IDS_LOG_RECONNECT, nullptr, true);
         SftpCloseConnection(ConnectSettings);
         Sleep(RECONNECT_SLEEP_MS);
-        SftpConnect(ConnectSettings);
+        if (SftpConnect(ConnectSettings) == SFTP_OK)
+            StartSshSessionServices(ConnectSettings);
         ConnectSettings->neednewchannel = ConnectSettings->sftpsession == nullptr;
         return ConnectSettings->session != nullptr && ConnectSettings->sftpsession != nullptr;
     }
@@ -1051,7 +1082,8 @@ bool ReconnectSFTPChannelIfNeeded(pConnectSettings ConnectSettings)
             ShowStatusId(IDS_LOG_RECONNECT, nullptr, true);
             SftpCloseConnection(ConnectSettings);
             Sleep(RECONNECT_SLEEP_MS);
-            SftpConnect(ConnectSettings);
+            if (SftpConnect(ConnectSettings) == SFTP_OK)
+                StartSshSessionServices(ConnectSettings);
         }
         ConnectSettings->neednewchannel = ConnectSettings->sftpsession == nullptr;
     }

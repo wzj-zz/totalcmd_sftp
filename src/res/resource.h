@@ -304,6 +304,7 @@
 // Jump Host (ProxyJump) dialog controls
 // ---------------------------------------------------------------------------
 #define IDD_JUMPHOST                    115
+#define IDD_TUNNELS                     118
 
 #define IDC_JUMP_BUTTON                 1070   // "Jump..." button in main dialog
 #define IDC_JUMP_ENABLE                 1071   // "Use jump host" checkbox in jump dialog
@@ -334,6 +335,9 @@
 #define IDC_JUMP_LABEL_PASS             1094
 #define IDC_JUMP_LABEL_PUBKEY           1095
 #define IDC_JUMP_LABEL_PRIVKEY          1096
+#define IDC_TUNNEL_BUTTON               1106
+#define IDC_TUNNEL_RULES                1107
+#define IDC_TUNNEL_HINT                 1108
 #define IDC_PROXY_GROUP                 1097
 #define IDC_PROXY_LABEL_HOST            1098
 #define IDC_PROXY_LABEL_USER            1099
@@ -398,6 +402,8 @@
 #define IDS_BTN_OK                      330
 #define IDS_DLG_WIN_LINEBREAKS          450
 #define IDS_DLG_UNIX_LINEBREAKS         451
+#define IDS_TUNNEL_DLG_CAPTION          456
+#define IDS_TUNNEL_DLG_HINT             457
 #define IDS_PROXY_DLG_NOPROXY           452
 #define IDS_PROXY_DLG_HTTP              453
 #define IDS_PROXY_DLG_SOCKS4A           454
@@ -570,4 +576,3 @@
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif
-
