@@ -44,7 +44,7 @@
   ```powershell
   pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\archive-smoke.ps1 -TotalCommanderPath '<Total Commander>' -Sessions 'vps,mini@' -WindowsSession 'win@' -WslDistros 'ubuntu_1,ubuntu_2'
   ```
-- Given only `<Total Commander>`, deploy and run the archive smoke test without asking for target names. Locate the deployment target at `<Total Commander>\Plugins\Wfx\SFTP\` and private session configuration at `<Total Commander>\sftpplug.ini`.
+- Given only `<Total Commander>`, run the default preflight, build Release, deploy, then run both smoke scripts without asking for target names. Locate the deployment target at `<Total Commander>\Plugins\Wfx\SFTP\` and private session configuration at `<Total Commander>\sftpplug.ini`.
 - Unless the user explicitly requests other targets, use Unix SSH/SFTP sessions `vps` and `mini@`, Windows OpenSSH/SFTP session `win@`, and WSL distributions `ubuntu_1` and `ubuntu_2`. Read the corresponding server/user settings only from that INI and use the local SSH agent through `ssh`/`scp`.
 - Before deployment or smoke testing, verify that `sftpplug.ini` contains all three default session display names and that both default WSL distributions are available through `wsl.exe` and `\\wsl.localhost\<distro>\tmp`. When all defaults exist, do not ask the user for sessions or WSL targets. When a default is unavailable, report the specific missing prerequisite and stop; do not guess replacements or modify private configuration.
 - User-supplied sessions or WSL distributions override the defaults for that run. Local Windows extraction requires no additional input.
@@ -52,7 +52,11 @@
 - The archive smoke fixture is tracked at `tests\fixtures\.oh-my-zsh.zip`. Do not replace it with a machine-specific path in tests. Successful archive transfer coverage must use its extracted multi-file payload; reserve tiny fixtures for failure, path, and deletion-semantic assertions that do not exercise transfer volume.
 - After deploying a build with default targets, run the scriptable smoke checks with:
   `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\archive-smoke.ps1 -TotalCommanderPath "<Total Commander>" -Sessions vps,mini@ -WindowsSession win@ -WslDistros ubuntu_1,ubuntu_2`
-- For an explicit user override, substitute only the user-provided session and WSL target values in that command.
+- Run the independent real SSH tunnel smoke test with one selected Unix and Windows OpenSSH profile:
+  `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\tunnel-smoke.ps1 -TotalCommanderPath "<Total Commander>" -UnixSession vps -WindowsSession win@`
+- The tunnel smoke script uses active WFX sessions and the router named-pipe operations to verify real `-L`, `-D`, and loopback-only `-R` TCP traffic for both profiles. It temporarily replaces each profile's tunnel rules and restores them in `finally`; do not replace it with direct `ssh -L/-R/-D` tests.
+- Tunnel smoke defaults are exactly Unix `vps` and Windows OpenSSH `win@`. Do not infer tunnel targets from the archive smoke `-Sessions` order or automatically select the first Unix or Windows-looking INI profile.
+- For a tunnel smoke override, use only the user-supplied `-UnixSession` and `-WindowsSession` values. For an archive smoke override, substitute only the user-supplied `-Sessions`, `-WindowsSession`, and `-WslDistros` values.
 - Do not silently skip the two selected Unix remote sessions, the Windows OpenSSH remote session, or all WSL UNC targets during a requested archive smoke run. Do not print or commit private host, password, key, session, or machine names.
 - Smoke output must use generic labels such as `Unix remote session #1`, `Windows remote`, and `WSL UNC target #1`; keep user-specific session names and WSL distro names out of committed files and shared logs.
 - The script creates only disposable paths: `%TEMP%\SftpArchiveSmoke-*`, remote `/tmp/sftpplug-archive-smoke-*`, and WSL UNC temp directories under detected `\\wsl.localhost\<distro>\tmp` paths or names supplied with `-WslDistros`. It cleans them up unless `-KeepArtifacts` is supplied.

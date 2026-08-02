@@ -99,6 +99,16 @@ Profile 不会自动获得这些规则。需要哪条就点 **Add...** 按模板
 
 IPv6 地址需要加方括号，例如 `[::1]`。
 
+## 隧道 Smoke Test
+
+部署 Release build 后，可使用一个 Unix SSH/SFTP profile 和一个 Windows OpenSSH/SFTP profile 验证真实隧道流量：
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\tunnel-smoke.ps1 -TotalCommanderPath '<Total Commander>' -UnixSession 'vps' -WindowsSession 'win@'
+```
+
+该测试会打开两个 WFX session，临时替换每个 profile 的隧道规则，并用真实 TCP echo 流量验证 Local forwarding (`-L`)、Dynamic SOCKS5 (`-D`) 和 Remote forwarding (`-R`)。它经由 router 到 WFX 的 named-pipe 路径测试启用和禁用，`finally` 中恢复原规则，并且只使用远端 `127.0.0.1` listener。Unix 远端需要 Python 3，Windows OpenSSH 远端需要 PowerShell。
+
 `0.0.0.0` 表示监听所有网卡，允许其它设备通过这台机器的 IP 访问；只想允许本机访问时应使用 `127.0.0.1`。Remote listener 是否允许 `0.0.0.0` 还取决于 SSH 服务器配置，例如 `GatewayPorts`。
 
 隧道启用状态只由主窗口的 `Toggle` 控制。当前 profile 已连接时，Toggle 会立即启用或停止隧道，并保存为下次连接的默认状态；未连接时，Toggle 只保存状态，在下次连接时应用。

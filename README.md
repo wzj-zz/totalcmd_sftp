@@ -69,6 +69,16 @@ Profiles do not receive tunnel rules automatically. Add only the templates you n
 
 `-L` and `-R` use `[bind_address:]listen_port:target_host:target_port`; `-D` uses `[bind_address:]listen_port`. Bracket IPv6 addresses, for example `[::1]`. Remote listeners may use any address allowed by the SSH server. SSH keepalive is equivalent to `ServerAliveInterval=30`, `ServerAliveCountMax=120`, and `TCPKeepAlive=yes`.
 
+## Tunnel Smoke Test
+
+After deploying a Release build, verify real tunnel traffic through one Unix SSH/SFTP profile and one Windows OpenSSH/SFTP profile:
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\tunnel-smoke.ps1 -TotalCommanderPath '<Total Commander>' -UnixSession 'vps' -WindowsSession 'win@'
+```
+
+The test opens both WFX sessions, temporarily replaces each profile's tunnel rules, and verifies local forwarding (`-L`), dynamic SOCKS5 (`-D`), and remote forwarding (`-R`) with real TCP echo traffic. It tests enable/disable through the router-to-WFX named-pipe path, restores the original rules in `finally`, and uses remote `127.0.0.1` listeners only. It requires Python 3 on the Unix remote and PowerShell on the Windows OpenSSH remote.
+
 `Alt+F11` runs one remote `find` command for the current SFTP directory tree and holds its names, sizes, and modification times in memory for ten minutes. Total Commander still performs its normal sync directory compare, patch selection, and copy operations through the WFX API. The cache is dropped after a successful remote write, rename, delete, move, or disconnect.
 
 `Alt+F12` is independent from the SFTP metadata cache. It supports SFTP-to-local and SFTP-to-SFTP comparisons by downloading each SFTP panel directory as a TAR stream into `%TEMP%\SftpLocalDiff\<session>`, then opening Total Commander's local Synchronize Directories window. When that window closes, changed SFTP mirrors are summarized and require explicit confirmation before their additions, replacements, and deletions are applied to the original remote directories. Unchanged sessions and successfully applied sessions are deleted automatically; declined or failed changes are retained for inspection and stale sessions are cleaned after seven days.

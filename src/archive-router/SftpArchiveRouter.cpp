@@ -2330,6 +2330,70 @@ int SelfTestSession(const std::wstring& path, const std::wstring& errorPath)
     return 1;
 }
 
+bool ReadUtf8TextFile(const std::wstring& path, std::string& text)
+{
+    std::ifstream file(std::filesystem::path(path), std::ios::binary);
+    if (!file)
+        return false;
+    file.seekg(0, std::ios::end);
+    const std::streamoff length = file.tellg();
+    if (length < 0 || length > 256 * 1024)
+        return false;
+    file.seekg(0, std::ios::beg);
+    text.resize(static_cast<size_t>(length));
+    if (!text.empty() && !file.read(text.data(), length))
+        return false;
+    if (text.starts_with("\xEF\xBB\xBF"))
+        text.erase(0, 3);
+    return true;
+}
+
+int SelfTestTunnel(const std::wstring& action, const std::wstring& path, const std::wstring& argument,
+                   const std::wstring& resultPath, const std::wstring& errorPath)
+{
+    g_nonInteractive = true;
+    g_nonInteractiveError.clear();
+    HANDLE pipe = OpenArchivePipe();
+    if (pipe == INVALID_HANDLE_VALUE) {
+        g_nonInteractiveError = L"The installed SFTP plugin does not provide the archive service.";
+    } else {
+        DWORD request = 0;
+        std::string items;
+        if (action == L"status") {
+            request = kArchiveTunnelStatus;
+        } else if (action == L"replace") {
+            request = kArchiveTunnelReplaceRules;
+            if (!ReadUtf8TextFile(argument, items))
+                g_nonInteractiveError = L"Could not read the SSH tunnel rules file.";
+        } else if (action == L"toggle") {
+            const size_t separator = argument.find(L'|');
+            wchar_t* end = nullptr;
+            const unsigned long index = separator == std::wstring::npos ? 0 : wcstoul(argument.c_str(), &end, 10);
+            if (separator == std::wstring::npos || (argument.substr(separator + 1) != L"0" && argument.substr(separator + 1) != L"1") ||
+                end != argument.c_str() + separator || index > 63) {
+                g_nonInteractiveError = L"Tunnel toggle requires <index>|<0|1>.";
+            } else {
+                request = kArchiveTunnelSetEnabled;
+                items = ToUtf8(argument);
+            }
+        } else {
+            g_nonInteractiveError = L"Unsupported SSH tunnel self-test action.";
+        }
+        std::string response;
+        if (g_nonInteractiveError.empty() && !StartArchiveRequest(pipe, request, path, L"", items, response))
+            g_nonInteractiveError = response.empty() ? L"The SSH tunnel operation failed." : FromUtf8(response);
+        CloseHandle(pipe);
+        if (g_nonInteractiveError.empty() && action == L"status" && !WriteUtf8TextFile(resultPath, FromUtf8(response)))
+            g_nonInteractiveError = L"Could not write the SSH tunnel status file.";
+    }
+    if (g_nonInteractiveError.empty())
+        return 0;
+    if (!errorPath.empty())
+        WriteUtf8TextFile(errorPath, g_nonInteractiveError);
+    WriteStdErrUtf8(g_nonInteractiveError);
+    return 1;
+}
+
 std::wstring GetExecutableDirectory()
 {
     std::vector<wchar_t> path(32768);
@@ -2636,12 +2700,26 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (!argv || argc < 2) {
-        ShowError(L"Usage: SftpArchiveRouter.exe init [-y]\n       SftpArchiveRouter.exe terminal <source-path>\n       SftpArchiveRouter.exe terminal-wt <tab|split> <source-path>\n       SftpArchiveRouter.exe tunnels <source-path>\n       SftpArchiveRouter.exe prewarm <source-path>\n       SftpArchiveRouter.exe localdiff <source-path> <target-path>\n       SftpArchiveRouter.exe copy|move|delete|pack|unpack <source-path> <target-path> <selected-list>");
+        ShowError(L"Usage: SftpArchiveRouter.exe init [-y]\n       SftpArchiveRouter.exe terminal <source-path>\n       SftpArchiveRouter.exe terminal-wt <tab|split> <source-path>\n       SftpArchiveRouter.exe tunnels <source-path>\n       SftpArchiveRouter.exe prewarm <source-path>\n       SftpArchiveRouter.exe localdiff <source-path> <target-path>\n       SftpArchiveRouter.exe copy|move|delete|pack|unpack <source-path> <target-path> <selected-list>\n       SftpArchiveRouter.exe selftest-tunnel <status|replace|toggle> <sftp-path> <argument> <result-file> [error-file]");
         if (argv) LocalFree(argv);
         return 2;
     }
 
     const std::wstring operation(argv[1]);
+    if (operation == L"selftest-tunnel") {
+        if (argc != 6 && argc != 7) {
+            LocalFree(argv);
+            WriteStdErrUtf8(L"Usage: SftpArchiveRouter.exe selftest-tunnel <status|replace|toggle> <sftp-path> <argument> <result-file> [error-file]");
+            return 2;
+        }
+        const std::wstring action(argv[2]);
+        const std::wstring path(argv[3]);
+        const std::wstring argument(argv[4]);
+        const std::wstring resultPath(argv[5]);
+        const std::wstring errorPath(argc == 7 ? argv[6] : L"");
+        LocalFree(argv);
+        return SelfTestTunnel(action, path, argument, resultPath, errorPath);
+    }
     if (operation == L"selftest-unpack-local") {
         if (argc != 4 && argc != 5) {
             LocalFree(argv);
