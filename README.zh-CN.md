@@ -162,6 +162,16 @@ SFTP\
 SftpArchiveRouter.exe init
 ```
 
+## 更新便携包
+
+如果要将当前 Release 插件更新到一个干净的绿色版 Total Commander ZIP，使用：
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\update-portable-package.ps1 -ArchivePath '<Total Commander ZIP>'
+```
+
+这与实例部署不同。脚本会临时解压 ZIP，只替换其中的 SFTP 插件目录，注册 router 快捷键和 user command，验证结果后原子替换原 ZIP，并删除临时目录。它不会启动干净的 Total Commander 实例；运行前请关闭所有正在运行的 Total Commander 实例。
+
 自动化部署应使用：
 
 ```powershell

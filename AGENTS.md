@@ -7,6 +7,7 @@
 - Output WFX: `build\bin\x64_Release\sftpplug.wfx`.
 - A successful build refreshes ignored `SFTP\` with only `SFTPplug.wfx64`, `SftpArchiveRouter.exe`, `SFTPplug.chm`, `sftp.php`, `language\zh-cn.lng`, `7z.exe`, `7z.dll`, and `7zip-License.txt`. Never add these generated artifacts to Git.
 - Deploy while Total Commander is stopped: delete the portable `<Total Commander>\Plugins\Wfx\SFTP\` directory, then copy the generated `SFTP\` directory in its place. Run `<Total Commander>\Plugins\Wfx\SFTP\SftpArchiveRouter.exe init -y` to register shortcuts without a success dialog, then restart Total Commander. Use plain `init` only when an interactive success dialog is wanted. Do not perform hash verification unless requested.
+- **Portable package update** is distinct from instance deployment. When the user says `update TotalCMD64.zip`, `更新 TotalCMD64.zip`, or supplies a ZIP path, run `scripts\update-portable-package.ps1 -ArchivePath '<archive>'`. The script builds the current Release package, temporarily extracts the clean ZIP, replaces only its `Plugins\Wfx\SFTP\` directory, runs `init -y` against the extracted portable root, verifies plugin files plus `Wincmd.ini`/`usercmd.ini`, atomically replaces the original ZIP, and removes its temporary extraction. It must not start the clean instance and must fail if any Total Commander or archive-router process is running.
 
 ## Documentation
 
