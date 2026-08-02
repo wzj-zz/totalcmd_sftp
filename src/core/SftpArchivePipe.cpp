@@ -1280,12 +1280,9 @@ void ServeClient(HANDLE pipe)
         RemoteEndpoint endpoint;
         if (OpenEndpoint(sourcePath, endpoint, error)) {
             ok = true;
-            const std::vector<bool> running = endpoint.cs->sshTunnelManager
-                ? endpoint.cs->sshTunnelManager->Running() : std::vector<bool>{};
             if (ok) {
                 for (size_t index = 0; index < endpoint.cs->sshTunnels.size(); ++index) {
-                    const bool enabled = index < running.size() && running[index];
-                    error += enabled ? "1\t" : "0\t";
+                    error += endpoint.cs->sshTunnels[index].startOnConnect ? "1\t" : "0\t";
                     error += FormatSshTunnelRule(endpoint.cs->sshTunnels[index]);
                     error += '\n';
                 }
