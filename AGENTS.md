@@ -6,6 +6,7 @@
   `& 'C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe' build\SFTPplug.sln /m /p:Configuration=Release /p:Platform=x64`
 - Output WFX: `build\bin\x64_Release\sftpplug.wfx`.
 - A successful build refreshes ignored `SFTP\` with only `SFTPplug.wfx64`, `SftpArchiveRouter.exe`, `SFTPplug.chm`, `sftp.php`, `language\zh-cn.lng`, `7z.exe`, `7z.dll`, and `7zip-License.txt`. Never add these generated artifacts to Git.
+- Before any automated verification that starts Total Commander, deployment, or handoff for manual feature verification, first direct both panels of an already-running Total Commander instance to `C:\`, then close it gracefully. Wait until `TOTALCMD64` and `SftpArchiveRouter` have exited before continuing. This prevents a later startup from restoring an SFTP panel and reconnecting automatically. Do not leave Total Commander running across test/deployment boundaries.
 - Deploy while Total Commander is stopped: delete the portable `<Total Commander>\Plugins\Wfx\SFTP\` directory, then copy the generated `SFTP\` directory in its place. Run `<Total Commander>\Plugins\Wfx\SFTP\SftpArchiveRouter.exe init -y` to register shortcuts without a success dialog, then restart Total Commander. Use plain `init` only when an interactive success dialog is wanted. Do not perform hash verification unless requested.
 - **Portable package update** is distinct from instance deployment. When the user says `update TotalCMD64.zip`, `更新 TotalCMD64.zip`, or supplies a ZIP path, run `scripts\update-portable-package.ps1 -ArchivePath '<archive>'`. The script builds the current Release package, temporarily extracts the clean ZIP, replaces only its `Plugins\Wfx\SFTP\` directory, runs `init -y` against the extracted portable root, verifies plugin files plus `Wincmd.ini`/`usercmd.ini`, atomically replaces the original ZIP, and removes its temporary extraction. It must not start the clean instance and must fail if any Total Commander or archive-router process is running.
 
@@ -30,11 +31,19 @@
   & 'C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe' build\SFTPplug.sln /m /p:Configuration=Release /p:Platform=x64
   if ($LASTEXITCODE -ne 0) { throw 'Release build failed.' }
   ```
-- Deployment command, replacing `<Total Commander>` before running. It stops Total Commander and archive-router processes, replaces only the portable SFTP plugin directory, registers shortcuts without a dialog, then restarts Total Commander:
+- Deployment command, replacing `<Total Commander>` before running. It moves both panels to `C:\`, closes Total Commander cleanly, waits for it and the archive router to exit, replaces only the portable SFTP plugin directory, registers shortcuts without a dialog, then restarts Total Commander:
   ```powershell
   $tc = '<Total Commander>'
   $target = Join-Path $tc 'Plugins\Wfx\SFTP'
+  $tcProcess = Get-Process TOTALCMD64 -ErrorAction SilentlyContinue
+  if ($tcProcess) {
+    Start-Process -FilePath (Join-Path $tc 'TOTALCMD64.EXE') -ArgumentList @('/O', '/L=C:\', '/R=C:\') -Wait
+    Start-Sleep -Milliseconds 500
+    $tcProcess | ForEach-Object { [void]$_.CloseMainWindow() }
+    $tcProcess | Wait-Process -Timeout 15 -ErrorAction SilentlyContinue
+  }
   Get-Process TOTALCMD64, SftpArchiveRouter -ErrorAction SilentlyContinue | Stop-Process -Force
+  Get-Process TOTALCMD64, SftpArchiveRouter -ErrorAction SilentlyContinue | Wait-Process -Timeout 15 -ErrorAction SilentlyContinue
   if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
   Copy-Item -LiteralPath 'SFTP' -Destination $target -Recurse -Force
   $init = Start-Process -FilePath (Join-Path $target 'SftpArchiveRouter.exe') -ArgumentList @('init', '-y') -Wait -PassThru -NoNewWindow
@@ -45,7 +54,7 @@
   ```powershell
   pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\archive-smoke.ps1 -TotalCommanderPath '<Total Commander>' -Sessions 'vps,mini@' -WindowsSession 'win@' -WslDistros 'ubuntu_1,ubuntu_2'
   ```
-- Given only `<Total Commander>`, run the default preflight, build Release, deploy, then run both smoke scripts without asking for target names. Locate the deployment target at `<Total Commander>\Plugins\Wfx\SFTP\` and private session configuration at `<Total Commander>\sftpplug.ini`.
+- Given only `<Total Commander>`, set both panels to `C:\` and close Total Commander before the default preflight, build Release, deploy, then run both smoke scripts without asking for target names. Locate the deployment target at `<Total Commander>\Plugins\Wfx\SFTP\` and private session configuration at `<Total Commander>\sftpplug.ini`.
 - Unless the user explicitly requests other targets, use Unix SSH/SFTP sessions `vps` and `mini@`, Windows OpenSSH/SFTP session `win@`, and WSL distributions `ubuntu_1` and `ubuntu_2`. Read the corresponding server/user settings only from that INI and use the local SSH agent through `ssh`/`scp`.
 - Before deployment or smoke testing, verify that `sftpplug.ini` contains all three default session display names and that both default WSL distributions are available through `wsl.exe` and `\\wsl.localhost\<distro>\tmp`. When all defaults exist, do not ask the user for sessions or WSL targets. When a default is unavailable, report the specific missing prerequisite and stop; do not guess replacements or modify private configuration.
 - User-supplied sessions or WSL distributions override the defaults for that run. Local Windows extraction requires no additional input.

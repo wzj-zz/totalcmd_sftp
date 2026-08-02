@@ -78,7 +78,14 @@ function Start-RemoteCommand($Session, [string]$Command) {
     foreach ($argument in $Session.SshArgs) { [void]$info.ArgumentList.Add($argument) }
     [void]$info.ArgumentList.Add($Session.Target)
     [void]$info.ArgumentList.Add($Command)
-    return [System.Diagnostics.Process]::Start($info)
+    for ($attempt = 1; $attempt -le 3; ++$attempt) {
+        try {
+            return [System.Diagnostics.Process]::Start($info)
+        } catch [System.ComponentModel.Win32Exception] {
+            if ($_.Exception.NativeErrorCode -ne 5 -or $attempt -eq 3) { throw }
+            Start-Sleep -Milliseconds (250 * $attempt)
+        }
+    }
 }
 
 function Start-TotalCommanderSessions([string]$Executable, [string]$LeftPath, [string]$RightPath) {

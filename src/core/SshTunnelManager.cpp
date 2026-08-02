@@ -12,6 +12,7 @@
 #include <vector>
 #include "SftpClient.h"
 #include "SftpInternal.h"
+#include "PluginEntryPoints.h"
 #include "SshTunnelManager.h"
 
 namespace {
@@ -19,6 +20,30 @@ namespace {
 constexpr int kTunnelBacklog = 16;
 constexpr DWORD kTunnelPollMs = 100;
 constexpr DWORD kRemoteForwardRetryMs = 3000;
+
+std::string TunnelDescription(const SshTunnelRule& rule)
+{
+    const std::string formatted = FormatSshTunnelRule(rule);
+    return formatted.size() > 2 ? formatted.substr(2) : formatted;
+}
+
+void LogTunnelStartFailed(const tConnectSettings* session, const std::string& error)
+{
+    if (LogProc) {
+        const std::string message = "SFTP tunnel startup failed for '" +
+            (session ? session->DisplayName : std::string("(unknown)")) + "': " + error;
+        LogProc(PluginNumber, MSGTYPE_IMPORTANTERROR, message.c_str());
+    }
+}
+
+void LogTunnelStarted(const tConnectSettings* session, const SshTunnelRule& rule)
+{
+    if (LogProc) {
+        const std::string message = "SFTP tunnel started for '" +
+            (session ? session->DisplayName : std::string("(unknown)")) + "': " + TunnelDescription(rule);
+        LogProc(PluginNumber, MSGTYPE_DETAILS, message.c_str());
+    }
+}
 
 void CloseSocket(SOCKET& socket) noexcept
 {
@@ -312,6 +337,7 @@ bool SshTunnelManager::SetEnabled(size_t index, bool enabled, std::string& error
 {
     if (!session_ || index >= tunnels_.size()) {
         error = "Tunnel rule is unavailable.";
+        LogTunnelStartFailed(session_, error);
         return false;
     }
     Tunnel& tunnel = *tunnels_[index];
@@ -340,9 +366,10 @@ bool SshTunnelManager::SetEnabled(size_t index, bool enabled, std::string& error
         int boundPort = tunnel.rule.listenPort;
         tunnel.remoteListener = OpenForwardListener(session_, tunnel.rule, boundPort);
         if (!tunnel.remoteListener) {
-            error = "SSH server refused remote tunnel " + FormatSshTunnelRule(tunnel.rule) +
+            error = "SSH server refused remote tunnel " + TunnelDescription(tunnel.rule) +
                 ". The remote listen port may still be releasing, already in use, or blocked by the server's remote forwarding policy.";
             tunnel.error = error;
+            LogTunnelStartFailed(session_, error);
             return false;
         }
         tunnel.listenerThread = std::thread([this, &tunnel] {
@@ -366,6 +393,7 @@ bool SshTunnelManager::SetEnabled(size_t index, bool enabled, std::string& error
         tunnel.localListener = CreateListener(tunnel.rule.bindAddress, tunnel.rule.listenPort, error);
         if (tunnel.localListener == INVALID_SOCKET) {
             tunnel.error = error;
+            LogTunnelStartFailed(session_, error);
             return false;
         }
         tunnel.listenerThread = std::thread([this, &tunnel] {
@@ -401,6 +429,7 @@ bool SshTunnelManager::SetEnabled(size_t index, bool enabled, std::string& error
         });
     }
     tunnel.running.store(true, std::memory_order_release);
+    LogTunnelStarted(session_, tunnel.rule);
     return true;
 }
 

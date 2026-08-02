@@ -335,10 +335,7 @@ void StartSshSessionServices(pConnectSettings cs) noexcept
     try {
         cs->sshTunnelManager = std::make_unique<SshTunnelManager>(cs);
         std::string tunnelError;
-        if (!cs->sshTunnelManager->StartDefaults(tunnelError) && LogProc) {
-            const std::string message = "SFTP tunnel startup failed: " + tunnelError;
-            LogProc(PluginNumber, MSGTYPE_IMPORTANTERROR, message.c_str());
-        }
+        cs->sshTunnelManager->StartDefaults(tunnelError);
     } catch (const std::bad_alloc&) {
         if (LogProc)
             LogProc(PluginNumber, MSGTYPE_IMPORTANTERROR, "SFTP tunnel startup failed: out of memory");
