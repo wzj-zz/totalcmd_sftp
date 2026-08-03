@@ -151,7 +151,7 @@ function Wait-ForSession([string]$Path, [int]$Index) {
         Start-Sleep -Milliseconds 750
     } while ([DateTime]::UtcNow -lt $deadline)
     $error = if (Test-Path -LiteralPath $errorFile) { Get-Content -LiteralPath $errorFile -Raw } else { '' }
-    throw "Unix remote session #$Index did not become active: $($error.Trim())"
+    throw "Remote WFX session #$Index did not become active: $($error.Trim())"
 }
 
 function Invoke-RouterPrewarm([string]$Path, [string]$Name) {
@@ -180,9 +180,17 @@ function Start-TotalCommanderSessions([string]$Executable, [string]$LeftPath, [s
 }
 
 function Activate-RemoteSessions([string]$Executable, [string]$LeftPath, [int]$LeftIndex, [string]$RightPath, [int]$RightIndex) {
-    Start-TotalCommanderSessions $Executable $LeftPath $RightPath
-    Wait-ForSession $LeftPath $LeftIndex
-    Wait-ForSession $RightPath $RightIndex
+    for ($attempt = 1; $attempt -le 3; ++$attempt) {
+        Start-TotalCommanderSessions $Executable $LeftPath $RightPath
+        try {
+            Wait-ForSession $LeftPath $LeftIndex
+            Wait-ForSession $RightPath $RightIndex
+            return
+        } catch {
+            if ($attempt -eq 3) { throw }
+            Start-Sleep -Seconds $attempt
+        }
+    }
 }
 
 function Remove-UncArtifacts([string[]]$Distros, [string]$RunId) {
