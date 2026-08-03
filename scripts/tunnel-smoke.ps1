@@ -104,10 +104,29 @@ function ConvertTo-PowerShellEncodedCommand([string]$Script) {
 }
 
 function Get-WindowsRemoteCommand([string]$Script) {
-    return 'powershell.exe -NoProfile -NonInteractive -EncodedCommand ' + (ConvertTo-PowerShellEncodedCommand $Script)
+    return [pscustomobject]@{
+        Command = 'powershell.exe -NoProfile -NonInteractive -Command -'
+        StandardInput = "`$ErrorActionPreference='Stop'; try { & { $Script }; exit 0 } catch { [Console]::Error.WriteLine(`$_); exit 1 }"
+    }
 }
 
-function Invoke-RemoteCommand($Session, [string]$Command) {
+function Add-RemoteCommand([System.Diagnostics.ProcessStartInfo]$Info, $Command) {
+    if ($Command -is [string]) {
+        [void]$Info.ArgumentList.Add($Command)
+        return
+    }
+    $Info.RedirectStandardInput = $true
+    $Info.StandardInputEncoding = [Text.UTF8Encoding]::new($false)
+    [void]$Info.ArgumentList.Add($Command.Command)
+}
+
+function Send-RemoteCommandInput([System.Diagnostics.Process]$Process, $Command) {
+    if ($Command -is [string]) { return }
+    $Process.StandardInput.Write($Command.StandardInput)
+    $Process.StandardInput.Close()
+}
+
+function Invoke-RemoteCommand($Session, $Command) {
     $info = [System.Diagnostics.ProcessStartInfo]::new()
     $info.FileName = 'ssh.exe'
     $info.UseShellExecute = $false
@@ -115,9 +134,10 @@ function Invoke-RemoteCommand($Session, [string]$Command) {
     $info.RedirectStandardError = $true
     foreach ($argument in $Session.SshArgs) { [void]$info.ArgumentList.Add($argument) }
     [void]$info.ArgumentList.Add($Session.Target)
-    [void]$info.ArgumentList.Add($Command)
+    Add-RemoteCommand $info $Command
     $process = Start-ProcessWithAccessRetry $info
     try {
+        Send-RemoteCommandInput $process $Command
         $outputTask = $process.StandardOutput.ReadToEndAsync()
         $errorTask = $process.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit($script:RemoteCommandTimeoutMs)) {
@@ -135,7 +155,7 @@ function Invoke-RemoteCommand($Session, [string]$Command) {
     }
 }
 
-function Start-RemoteCommand($Session, [string]$Command) {
+function Start-RemoteCommand($Session, $Command) {
     $info = [System.Diagnostics.ProcessStartInfo]::new()
     $info.FileName = 'ssh.exe'
     $info.UseShellExecute = $false
@@ -143,8 +163,10 @@ function Start-RemoteCommand($Session, [string]$Command) {
     $info.RedirectStandardError = $true
     foreach ($argument in $Session.SshArgs) { [void]$info.ArgumentList.Add($argument) }
     [void]$info.ArgumentList.Add($Session.Target)
-    [void]$info.ArgumentList.Add($Command)
-    return Start-ProcessWithAccessRetry $info
+    Add-RemoteCommand $info $Command
+    $process = Start-ProcessWithAccessRetry $info
+    Send-RemoteCommandInput $process $Command
+    return $process
 }
 
 function Start-TotalCommanderSessions([string]$Executable, [string]$LeftPath, [string]$RightPath) {

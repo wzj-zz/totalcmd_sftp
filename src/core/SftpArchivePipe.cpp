@@ -203,8 +203,12 @@ struct RemoteEndpoint {
     std::string remotePath;
 };
 
-bool OpenEndpoint(const std::string& virtualPath, RemoteEndpoint& endpoint, std::string& error,
-                  bool primarySession = false)
+struct TunnelEndpoint {
+    ServerSessionLease lease;
+    pConnectSettings cs = nullptr;
+};
+
+bool OpenEndpoint(const std::string& virtualPath, RemoteEndpoint& endpoint, std::string& error)
 {
     std::string sessionName;
     std::wstring relativePath;
@@ -212,9 +216,7 @@ bool OpenEndpoint(const std::string& virtualPath, RemoteEndpoint& endpoint, std:
         error = "Invalid SFTP path.";
         return false;
     }
-    endpoint.lease = primarySession
-        ? AcquirePrimaryServerSessionLease(sessionName.c_str())
-        : AcquireServerSessionLease(sessionName.c_str());
+    endpoint.lease = AcquireServerSessionLease(sessionName.c_str());
     endpoint.cs = static_cast<pConnectSettings>(endpoint.lease.get());
     if (!endpoint.cs) {
         error = "The SFTP session is not connected.";
@@ -236,6 +238,27 @@ bool OpenEndpoint(const std::string& virtualPath, RemoteEndpoint& endpoint, std:
     while (endpoint.remotePath.size() > 1 && endpoint.remotePath.ends_with('/'))
         endpoint.remotePath.pop_back();
     return !endpoint.remotePath.empty();
+}
+
+bool OpenTunnelEndpoint(const std::string& virtualPath, TunnelEndpoint& endpoint, std::string& error)
+{
+    std::string sessionName;
+    std::wstring relativePath;
+    if (!ParseSftpPath(virtualPath, sessionName, relativePath)) {
+        error = "Invalid SFTP path.";
+        return false;
+    }
+    endpoint.lease = AcquirePrimaryServerSessionLease(sessionName.c_str());
+    endpoint.cs = static_cast<pConnectSettings>(endpoint.lease.get());
+    if (!endpoint.cs) {
+        error = "The SFTP session is not connected.";
+        return false;
+    }
+    if (IsPhpAgentTransport(endpoint.cs) || IsLanPairTransport(endpoint.cs) || !endpoint.cs->session) {
+        error = "The selected transport does not support SSH tunnels.";
+        return false;
+    }
+    return true;
 }
 
 bool ReconnectArchiveSession(pConnectSettings cs)
@@ -1299,8 +1322,8 @@ void ServeClient(HANDLE pipe)
             error = "Total Commander cannot display plugin error messages.";
         }
     } else if (request.operation == kArchiveTunnelStatus) {
-        RemoteEndpoint endpoint;
-        if (OpenEndpoint(sourcePath, endpoint, error, true)) {
+        TunnelEndpoint endpoint;
+        if (OpenTunnelEndpoint(sourcePath, endpoint, error)) {
             ok = true;
             if (ok) {
                 const std::vector<SshTunnelStatus> statuses = endpoint.cs->sshTunnelManager
@@ -1322,13 +1345,13 @@ void ServeClient(HANDLE pipe)
             }
         }
     } else if (request.operation == kArchiveTunnelSetEnabled) {
-        RemoteEndpoint endpoint;
+        TunnelEndpoint endpoint;
         const size_t separator = items.find('|');
         const std::string indexText = items.substr(0, separator);
         const bool enabled = separator != std::string::npos && items.substr(separator + 1) == "1";
         const unsigned long index = strtoul(indexText.c_str(), nullptr, 10);
-        if (!OpenEndpoint(sourcePath, endpoint, error, true)) {
-            // OpenEndpoint populated a useful active-session error.
+        if (!OpenTunnelEndpoint(sourcePath, endpoint, error)) {
+            // OpenTunnelEndpoint populated a useful active-session error.
         } else if (separator == std::string::npos || index >= endpoint.cs->sshTunnels.size()) {
             error = "Invalid SSH tunnel selection.";
         } else {
@@ -1349,10 +1372,10 @@ void ServeClient(HANDLE pipe)
             }
         }
     } else if (request.operation == kArchiveTunnelReplaceRules) {
-        RemoteEndpoint endpoint;
+        TunnelEndpoint endpoint;
         std::vector<SshTunnelRule> rules;
-        if (!OpenEndpoint(sourcePath, endpoint, error, true)) {
-            // OpenEndpoint populated a useful active-session error.
+        if (!OpenTunnelEndpoint(sourcePath, endpoint, error)) {
+            // OpenTunnelEndpoint populated a useful active-session error.
         } else if (!ParseTunnelRuleLines(items, rules, error)) {
             // ParseTunnelRuleLines populated a useful validation error.
         } else {

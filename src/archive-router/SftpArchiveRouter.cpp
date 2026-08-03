@@ -591,14 +591,22 @@ bool LoadTunnelStatusOffline(const std::wstring& sourcePath, TunnelPanelState& s
 
 bool LoadTunnelStatus(const std::wstring& sourcePath, TunnelPanelState& state, std::wstring& error)
 {
-    HANDLE pipe = OpenArchivePipe();
-    if (pipe == INVALID_HANDLE_VALUE) {
-        error = L"The active Total Commander SFTP plugin service is unavailable.";
-        return false;
-    }
     std::string status;
-    const bool ok = StartArchiveRequest(pipe, kArchiveTunnelStatus, sourcePath, L"", "", status);
-    CloseHandle(pipe);
+    bool ok = false;
+    for (int attempt = 0; attempt != 3; ++attempt) {
+        HANDLE pipe = OpenArchivePipe();
+        if (pipe == INVALID_HANDLE_VALUE) {
+            status = "The active Total Commander SFTP plugin service is unavailable.";
+        } else {
+            ok = StartArchiveRequest(pipe, kArchiveTunnelStatus, sourcePath, L"", "", status);
+            CloseHandle(pipe);
+            if (ok || (!status.starts_with("Could not write the SFTP archive request ") &&
+                       !status.starts_with("Could not read the SFTP archive service ")))
+                break;
+        }
+        if (attempt != 2)
+            Sleep(50);
+    }
     if (!ok) {
         if (status == "The SFTP session is not connected.")
             return LoadTunnelStatusOffline(sourcePath, state, error);
@@ -1268,8 +1276,12 @@ bool ReadExact(HANDLE handle, void* data, DWORD length)
     auto* out = static_cast<BYTE*>(data);
     while (length > 0) {
         DWORD got = 0;
-        if (!ReadFile(handle, out, length, &got, nullptr) || got == 0)
+        if (!ReadFile(handle, out, length, &got, nullptr))
             return false;
+        if (got == 0) {
+            SetLastError(ERROR_BROKEN_PIPE);
+            return false;
+        }
         out += got;
         length -= got;
     }
@@ -1281,8 +1293,12 @@ bool WriteExact(HANDLE handle, const void* data, DWORD length)
     const auto* input = static_cast<const BYTE*>(data);
     while (length > 0) {
         DWORD written = 0;
-        if (!WriteFile(handle, input, length, &written, nullptr) || written == 0)
+        if (!WriteFile(handle, input, length, &written, nullptr))
             return false;
+        if (written == 0) {
+            SetLastError(ERROR_BROKEN_PIPE);
+            return false;
+        }
         input += written;
         length -= written;
     }
@@ -1293,13 +1309,24 @@ bool ReadResult(HANDLE pipe, std::string& error)
 {
     DWORD code = 1;
     DWORD textBytes = 0;
-    if (!ReadExact(pipe, &code, sizeof(code)) || !ReadExact(pipe, &textBytes, sizeof(textBytes)) || textBytes > 4096) {
-        error = "The SFTP archive service did not return a valid result.";
+    if (!ReadExact(pipe, &code, sizeof(code))) {
+        error = "Could not read the SFTP archive service result code (Windows error " +
+            std::to_string(GetLastError()) + ").";
+        return false;
+    }
+    if (!ReadExact(pipe, &textBytes, sizeof(textBytes))) {
+        error = "Could not read the SFTP archive service result length (Windows error " +
+            std::to_string(GetLastError()) + ").";
+        return false;
+    }
+    if (textBytes > 4096) {
+        error = "The SFTP archive service returned an invalid result length.";
         return false;
     }
     error.assign(textBytes, '\0');
     if (textBytes && !ReadExact(pipe, error.data(), textBytes)) {
-        error = "The SFTP archive service disconnected.";
+        error = "Could not read the SFTP archive service result text (Windows error " +
+            std::to_string(GetLastError()) + ").";
         return false;
     }
     return code == 0;
@@ -1516,10 +1543,17 @@ bool StartArchiveRequest(HANDLE pipe, DWORD operation, std::wstring_view sourceP
                                   static_cast<DWORD>(sourceUtf8.size()),
                                   static_cast<DWORD>(targetUtf8.size()),
                                   static_cast<DWORD>(items.size()) };
-    return WriteExact(pipe, &request, sizeof(request)) &&
-           WriteExact(pipe, sourceUtf8.data(), request.sourcePathBytes) &&
-           WriteExact(pipe, targetUtf8.data(), request.targetPathBytes) &&
-           WriteExact(pipe, items.data(), request.itemBytes) &&
+    const auto writePart = [&](const void* data, DWORD length, const char* part) {
+        if (WriteExact(pipe, data, length))
+            return true;
+        error = std::string("Could not write the SFTP archive request ") + part +
+            " (Windows error " + std::to_string(GetLastError()) + ").";
+        return false;
+    };
+    return writePart(&request, sizeof(request), "header") &&
+           writePart(sourceUtf8.data(), request.sourcePathBytes, "source path") &&
+           writePart(targetUtf8.data(), request.targetPathBytes, "target path") &&
+           writePart(items.data(), request.itemBytes, "payload") &&
            ReadResult(pipe, error);
 }
 
