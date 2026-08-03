@@ -11,6 +11,15 @@ $script:RouterTimeoutMs = 60000
 $script:RemoteCommandTimeoutMs = 60000
 $script:EchoReadyTimeoutSeconds = 15
 
+Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+public static class TunnelSmokeIni {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool WritePrivateProfileString(string section, string key, string value, string file);
+}
+'@
+
 function Stop-TestProcess([System.Diagnostics.Process]$Process) {
     if (-not $Process) { return }
     try {
@@ -29,6 +38,21 @@ function Add-Result([string]$Name, [string]$Status, [string]$Details = '') {
     $line = "[$Status] $Name"
     if ($Details) { $line += " - $Details" }
     Write-Host $line -ForegroundColor $(if ($Status -eq 'PASS') { 'Green' } else { 'Red' })
+}
+
+function Start-ProcessWithAccessRetry([System.Diagnostics.ProcessStartInfo]$Info) {
+    for ($attempt = 1; $attempt -le 10; ++$attempt) {
+        try {
+            return [System.Diagnostics.Process]::Start($Info)
+        } catch {
+            $exception = $_.Exception
+            while ($exception -and -not ($exception -is [System.ComponentModel.Win32Exception])) {
+                $exception = $exception.InnerException
+            }
+            if (-not $exception -or $exception.NativeErrorCode -ne 5 -or $attempt -eq 10) { throw }
+            Start-Sleep -Milliseconds (200 * $attempt)
+        }
+    }
 }
 
 function Run-Case([string]$Name, [scriptblock]$Action) {
@@ -92,7 +116,7 @@ function Invoke-RemoteCommand($Session, [string]$Command) {
     foreach ($argument in $Session.SshArgs) { [void]$info.ArgumentList.Add($argument) }
     [void]$info.ArgumentList.Add($Session.Target)
     [void]$info.ArgumentList.Add($Command)
-    $process = [System.Diagnostics.Process]::Start($info)
+    $process = Start-ProcessWithAccessRetry $info
     try {
         $outputTask = $process.StandardOutput.ReadToEndAsync()
         $errorTask = $process.StandardError.ReadToEndAsync()
@@ -120,18 +144,7 @@ function Start-RemoteCommand($Session, [string]$Command) {
     foreach ($argument in $Session.SshArgs) { [void]$info.ArgumentList.Add($argument) }
     [void]$info.ArgumentList.Add($Session.Target)
     [void]$info.ArgumentList.Add($Command)
-    for ($attempt = 1; $attempt -le 3; ++$attempt) {
-        try {
-            return [System.Diagnostics.Process]::Start($info)
-        } catch {
-            $exception = $_.Exception
-            while ($exception -and -not ($exception -is [System.ComponentModel.Win32Exception])) {
-                $exception = $exception.InnerException
-            }
-            if (-not $exception -or $exception.NativeErrorCode -ne 5 -or $attempt -eq 3) { throw }
-            Start-Sleep -Milliseconds (250 * $attempt)
-        }
-    }
+    return Start-ProcessWithAccessRetry $info
 }
 
 function Start-TotalCommanderSessions([string]$Executable, [string]$LeftPath, [string]$RightPath) {
@@ -139,7 +152,7 @@ function Start-TotalCommanderSessions([string]$Executable, [string]$LeftPath, [s
     $info.FileName = $Executable
     $info.UseShellExecute = $false
     foreach ($argument in @('/O', "/L=$LeftPath", "/R=$RightPath")) { [void]$info.ArgumentList.Add($argument) }
-    [System.Diagnostics.Process]::Start($info).Dispose()
+    (Start-ProcessWithAccessRetry $info).Dispose()
 }
 
 function Close-TestTotalCommander([string]$Executable) {
@@ -152,6 +165,16 @@ function Close-TestTotalCommander([string]$Executable) {
     Start-Sleep -Milliseconds 500
     $processes | ForEach-Object { [void]$_.CloseMainWindow() }
     $processes | Wait-Process -Timeout 15 -ErrorAction SilentlyContinue
+    $remaining = @($processes | Where-Object { -not $_.HasExited })
+    if ($remaining) {
+        $remaining | Stop-Process -Force
+        $remaining | Wait-Process -Timeout 15 -ErrorAction SilentlyContinue
+    }
+}
+
+function Restart-TotalCommanderSessions([string]$Executable, [string]$LeftPath, [string]$RightPath) {
+    Close-TestTotalCommander $Executable
+    Start-TotalCommanderSessions $Executable $LeftPath $RightPath
 }
 
 function Invoke-RouterTunnel([string]$Action, [string]$Path, [string]$Argument, [string]$ResultName) {
@@ -163,7 +186,7 @@ function Invoke-RouterTunnel([string]$Action, [string]$Path, [string]$Argument, 
     $info.UseShellExecute = $false
     $info.RedirectStandardError = $true
     foreach ($value in @('selftest-tunnel', $Action, $Path, $Argument, $resultPath, $errorPath)) { [void]$info.ArgumentList.Add($value) }
-    $process = [System.Diagnostics.Process]::Start($info)
+    $process = Start-ProcessWithAccessRetry $info
     $standardErrorTask = $process.StandardError.ReadToEndAsync()
     if (-not $process.WaitForExit($script:RouterTimeoutMs)) {
         Stop-TestProcess $process
@@ -189,7 +212,7 @@ function Wait-ForSession([string]$Path, [string]$Label) {
         $info.UseShellExecute = $false
         $info.RedirectStandardError = $true
         foreach ($argument in @('selftest-session', $Path, $errorPath)) { [void]$info.ArgumentList.Add($argument) }
-        $process = [System.Diagnostics.Process]::Start($info)
+        $process = Start-ProcessWithAccessRetry $info
         $standardErrorTask = $process.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit($script:RouterTimeoutMs)) {
             Stop-TestProcess $process
@@ -324,6 +347,56 @@ function Wait-RemoteEchoClient([System.Diagnostics.Process]$Process) {
     if ($output -ne 'TUNNEL:tunnel-smoke') { throw 'Remote reverse-tunnel client did not receive the echo response.' }
 }
 
+function Test-RemoteTcpPortClosed($Session, [string]$Kind, [int]$Port) {
+    if ($Kind -eq 'Unix') {
+        $python = "import socket; c=socket.socket(); c.settimeout(1);`ntry:`n c.connect(('127.0.0.1',$Port)); print('OPEN')`nexcept OSError:`n print('CLOSED')`nfinally:`n c.close()"
+        $output = Invoke-RemoteCommand $Session ("python3 -c " + (Quote-Remote $python))
+    } else {
+        $script = "`$client=[Net.Sockets.TcpClient]::new(); try { try { `$task=`$client.ConnectAsync('127.0.0.1',$Port); if (-not `$task.Wait(1000)) { [Console]::Write('CLOSED'); return }; `$task.GetAwaiter().GetResult(); [Console]::Write('OPEN') } catch [Net.Sockets.SocketException] { [Console]::Write('CLOSED') } } finally { `$client.Dispose() }"
+        $output = Invoke-RemoteCommand $Session (Get-WindowsRemoteCommand $script)
+    }
+    $result = ($output | Out-String).Trim()
+    if ($result -eq 'CLOSED') { return $true }
+    if ($result -eq 'OPEN') { return $false }
+    throw 'Remote listener probe returned an invalid result.'
+}
+
+function Start-RemoteHoldServer($Session, [string]$Kind, [int]$Port) {
+    if ($Kind -eq 'Unix') {
+        $python = "import socket; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(('127.0.0.1',$Port)); s.listen(1); print('READY',flush=True); c,_=s.accept();`ntry:`n while c.recv(1): pass`nfinally:`n c.close(); s.close()"
+        return Start-RemoteCommand $Session ("python3 -c " + (Quote-Remote $python))
+    }
+    $script = "`$listener=[Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback,$Port); `$listener.Start(); [Console]::WriteLine('READY'); try { `$client=`$listener.AcceptTcpClient(); try { `$stream=`$client.GetStream(); `$buffer=[byte[]]::new(1); while (`$stream.Read(`$buffer,0,1) -gt 0) {} } finally { `$client.Dispose() } } finally { `$listener.Stop() }"
+    return Start-RemoteCommand $Session (Get-WindowsRemoteCommand $script)
+}
+
+function Open-SocksHoldConnection([int]$Port, [int]$TargetPort) {
+    $client = [System.Net.Sockets.TcpClient]::new()
+    try {
+        $connect = $client.ConnectAsync([System.Net.IPAddress]::Loopback, $Port)
+        if (-not $connect.Wait(5000)) { throw 'SOCKS hold connection timed out.' }
+        $null = $connect.GetAwaiter().GetResult()
+        $stream = $client.GetStream()
+        $stream.ReadTimeout = 5000
+        $stream.WriteTimeout = 5000
+        $stream.Write([byte[]](5, 1, 0), 0, 3)
+        $greeting = Read-Exact $stream 2
+        if ($greeting[0] -ne 5 -or $greeting[1] -ne 0) { throw 'SOCKS hold connection greeting failed.' }
+        $request = [byte[]](5, 1, 0, 1, 127, 0, 0, 1, ($TargetPort -shr 8), ($TargetPort -band 0xff))
+        $stream.Write($request, 0, $request.Length)
+        $reply = Read-Exact $stream 10
+        if ($reply[1] -ne 0) { throw 'SOCKS hold connection request failed.' }
+        $buffer = [byte[]]::new(1)
+        return [pscustomobject]@{
+            Client = $client
+            ReadTask = $stream.ReadAsync($buffer, 0, 1)
+        }
+    } catch {
+        $client.Dispose()
+        throw
+    }
+}
+
 function Start-LocalEchoServer([int]$Port) {
     $script = "`$listener=[Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback,$Port); `$listener.Start(); [Console]::WriteLine('READY'); try { `$client=`$listener.AcceptTcpClient(); try { `$stream=`$client.GetStream(); `$buffer=[byte[]]::new(64); `$count=`$stream.Read(`$buffer,0,`$buffer.Length); `$reply=[Text.Encoding]::ASCII.GetBytes('TUNNEL:' + [Text.Encoding]::ASCII.GetString(`$buffer,0,`$count)); `$stream.Write(`$reply,0,`$reply.Length) } finally { `$client.Dispose() } } finally { `$listener.Stop() }"
     $info = [System.Diagnostics.ProcessStartInfo]::new()
@@ -335,7 +408,7 @@ function Start-LocalEchoServer([int]$Port) {
     [void]$info.ArgumentList.Add('-NonInteractive')
     [void]$info.ArgumentList.Add('-EncodedCommand')
     [void]$info.ArgumentList.Add((ConvertTo-PowerShellEncodedCommand $script))
-    return [System.Diagnostics.Process]::Start($info)
+    return Start-ProcessWithAccessRetry $info
 }
 
 function Write-TunnelRules([string[]]$Rules, [string]$Name) {
@@ -346,18 +419,37 @@ function Write-TunnelRules([string[]]$Rules, [string]$Name) {
     return $path
 }
 
+function Set-OfflineTunnelRules([string]$Section, [string[]]$Rules) {
+    for ($index = 1; $index -le 64; ++$index) {
+        if (-not [TunnelSmokeIni]::WritePrivateProfileString($Section, "tunnel$index", $null, $script:IniPath)) {
+            throw 'Could not clear an offline tunnel rule.'
+        }
+    }
+    for ($index = 0; $index -lt $Rules.Count; ++$index) {
+        if (-not [TunnelSmokeIni]::WritePrivateProfileString($Section, "tunnel$($index + 1)", $Rules[$index], $script:IniPath)) {
+            throw 'Could not save an offline tunnel rule.'
+        }
+    }
+}
+
 function Get-TunnelRules([string]$Status) {
     $rules = [System.Collections.Generic.List[string]]::new()
     foreach ($line in $Status -split "`r?`n") {
-        if ($line.Length -gt 2 -and ($line[0] -eq '0' -or $line[0] -eq '1') -and $line[1] -eq "`t") { [void]$rules.Add($line.Substring(2)) }
+        $fields = $line -split "`t", 4
+        if ($fields.Count -ge 3 -and ($fields[0] -eq '0' -or $fields[0] -eq '1')) { [void]$rules.Add($fields[2]) }
     }
     return $rules.ToArray()
 }
 
-function Assert-TunnelStatus([string]$Path, [bool]$Enabled, [string]$Name) {
+function Assert-TunnelStatus([string]$Path, [bool]$Desired, [string]$Runtime, [string]$Name, [int]$Index = 0) {
     $status = Invoke-RouterTunnel status $Path '-' "$Name-status"
-    $expected = if ($Enabled) { '1' } else { '0' }
-    if ($status -notmatch "(?m)^$expected`t") { throw "Tunnel status did not report $($Enabled ? 'Enabled' : 'Disabled')." }
+    $rows = @($status -split "`r?`n" | Where-Object { $_ })
+    if ($Index -ge $rows.Count) { throw "Tunnel status did not contain rule index $Index." }
+    $fields = $rows[$Index] -split "`t", 4
+    $expected = if ($Desired) { '1' } else { '0' }
+    if ($fields.Count -lt 3 -or $fields[0] -ne $expected -or $fields[1] -ne $Runtime) {
+        throw "Tunnel status did not report desired=$expected runtime=$Runtime for rule index $Index."
+    }
 }
 
 function Set-TunnelRules([string]$Path, [string[]]$Rules, [string]$Name) {
@@ -396,10 +488,10 @@ function Test-TunnelProfile($Profile) {
             Wait-ForRemoteEchoServer $remoteServer
             Set-TunnelRules $path @("- -L 127.0.0.1:${localPort}:127.0.0.1:${remotePort}") "$($Profile.Label)-local"
             Invoke-RouterTunnel toggle $path '0|1' "$($Profile.Label)-local-enable" | Out-Null
-            Assert-TunnelStatus $path $true "$($Profile.Label)-local-enabled"
+            Assert-TunnelStatus $path $true 'running' "$($Profile.Label)-local-enabled"
             Invoke-TcpEcho $localPort $remotePort
             Invoke-RouterTunnel toggle $path '0|0' "$($Profile.Label)-local-disable" | Out-Null
-            Assert-TunnelStatus $path $false "$($Profile.Label)-local-disabled"
+            Assert-TunnelStatus $path $false 'stopped' "$($Profile.Label)-local-disabled"
             if (-not (Test-TcpPortClosed $localPort)) { throw 'Local forwarding listener remained reachable after disabling it.' }
         } finally {
             Stop-TestProcess $remoteServer
@@ -414,10 +506,10 @@ function Test-TunnelProfile($Profile) {
             Wait-ForRemoteEchoServer $remoteServer
             Set-TunnelRules $path @("- -D 127.0.0.1:${localPort}") "$($Profile.Label)-dynamic"
             Invoke-RouterTunnel toggle $path '0|1' "$($Profile.Label)-dynamic-enable" | Out-Null
-            Assert-TunnelStatus $path $true "$($Profile.Label)-dynamic-enabled"
+            Assert-TunnelStatus $path $true 'running' "$($Profile.Label)-dynamic-enabled"
             Invoke-TcpEcho $localPort $remotePort -Socks
             Invoke-RouterTunnel toggle $path '0|0' "$($Profile.Label)-dynamic-disable" | Out-Null
-            Assert-TunnelStatus $path $false "$($Profile.Label)-dynamic-disabled"
+            Assert-TunnelStatus $path $false 'stopped' "$($Profile.Label)-dynamic-disabled"
             if (-not (Test-TcpPortClosed $localPort)) { throw 'Dynamic SOCKS5 listener remained reachable after disabling it.' }
         } finally {
             Stop-TestProcess $remoteServer
@@ -433,14 +525,84 @@ function Test-TunnelProfile($Profile) {
             Wait-ForRemoteEchoServer $localServer
             Set-TunnelRules $path @("- -R 127.0.0.1:${remotePort}:127.0.0.1:${localPort}") "$($Profile.Label)-remote"
             Invoke-RouterTunnel toggle $path '0|1' "$($Profile.Label)-remote-enable" | Out-Null
-            Assert-TunnelStatus $path $true "$($Profile.Label)-remote-enabled"
+            Assert-TunnelStatus $path $true 'running' "$($Profile.Label)-remote-enabled"
             Wait-RemoteEchoClient $remoteClient
             if (-not $localServer.WaitForExit(5000) -or $localServer.ExitCode -ne 0) { throw 'Local reverse-tunnel echo server did not complete successfully.' }
             Invoke-RouterTunnel toggle $path '0|0' "$($Profile.Label)-remote-disable" | Out-Null
-            Assert-TunnelStatus $path $false "$($Profile.Label)-remote-disabled"
+            Assert-TunnelStatus $path $false 'stopped' "$($Profile.Label)-remote-disabled"
         } finally {
             Stop-TestProcess $localServer
             Stop-TestProcess $remoteClient
+        }
+        }
+
+        Run-Case "$($Profile.Label) multiple same-type tunnels stay independent" {
+        $remotePort1 = Get-AvailableRemoteLoopbackPort $Profile.Ssh $Profile.Kind
+        $remotePort2 = Get-AvailableRemoteLoopbackPort $Profile.Ssh $Profile.Kind
+        $localPort1 = Get-AvailableLoopbackPort
+        $localPort2 = Get-AvailableLoopbackPort
+        $server1 = Start-RemoteEchoServer $Profile.Ssh $Profile.Kind $remotePort1
+        $server2 = Start-RemoteEchoServer $Profile.Ssh $Profile.Kind $remotePort2
+        try {
+            Wait-ForRemoteEchoServer $server1
+            Wait-ForRemoteEchoServer $server2
+            Set-TunnelRules $path @(
+                "+ -L 127.0.0.1:${localPort1}:127.0.0.1:${remotePort1}",
+                "+ -L 127.0.0.1:${localPort2}:127.0.0.1:${remotePort2}"
+            ) "$($Profile.Label)-multiple-local"
+            Assert-TunnelStatus $path $true 'running' "$($Profile.Label)-multiple-local-1" 0
+            Assert-TunnelStatus $path $true 'running' "$($Profile.Label)-multiple-local-2" 1
+            Set-TunnelRules $path @(
+                "+ -L 127.0.0.1:${localPort1}:127.0.0.1:${remotePort1}",
+                "- -L 127.0.0.1:${localPort2}:127.0.0.1:${remotePort2}"
+            ) "$($Profile.Label)-disable-second-local"
+            Assert-TunnelStatus $path $true 'running' "$($Profile.Label)-first-local-preserved" 0
+            Assert-TunnelStatus $path $false 'stopped' "$($Profile.Label)-second-local-stopped" 1
+            Invoke-TcpEcho $localPort1 $remotePort1
+            if (-not (Test-TcpPortClosed $localPort2)) { throw 'Second local listener remained reachable after its rule was disabled.' }
+        } finally {
+            Stop-TestProcess $server1
+            Stop-TestProcess $server2
+        }
+        }
+
+        Run-Case "$($Profile.Label) enabled startup failure remains retryable" {
+        $localPort = Get-AvailableLoopbackPort
+        $occupied = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $localPort)
+        try {
+            $occupied.Start()
+            Set-TunnelRules $path @("+ -D 127.0.0.1:${localPort}") "$($Profile.Label)-failed-enabled"
+            Assert-TunnelStatus $path $true 'failed' "$($Profile.Label)-failed-enabled"
+            Invoke-RouterTunnel manager-toggle $path '0' "$($Profile.Label)-failed-disable" | Out-Null
+            Assert-TunnelStatus $path $false 'stopped' "$($Profile.Label)-failed-disabled"
+        } finally {
+            $occupied.Stop()
+        }
+        Invoke-RouterTunnel manager-toggle $path '0' "$($Profile.Label)-retry-enabled" | Out-Null
+        Assert-TunnelStatus $path $true 'running' "$($Profile.Label)-retry-running"
+        Invoke-RouterTunnel manager-toggle $path '0' "$($Profile.Label)-retry-disable" | Out-Null
+        Assert-TunnelStatus $path $false 'stopped' "$($Profile.Label)-retry-stopped"
+        }
+
+        Run-Case "$($Profile.Label) disable interrupts active relay" {
+        $remotePort = Get-AvailableRemoteLoopbackPort $Profile.Ssh $Profile.Kind
+        $localPort = Get-AvailableLoopbackPort
+        $server = Start-RemoteHoldServer $Profile.Ssh $Profile.Kind $remotePort
+        $connection = $null
+        try {
+            Wait-ForRemoteEchoServer $server
+            Set-TunnelRules $path @("+ -D 127.0.0.1:${localPort}") "$($Profile.Label)-active-relay"
+            Assert-TunnelStatus $path $true 'running' "$($Profile.Label)-active-relay-running"
+            $connection = Open-SocksHoldConnection $localPort $remotePort
+            Invoke-RouterTunnel manager-toggle $path '0' "$($Profile.Label)-active-relay-disable" | Out-Null
+            Assert-TunnelStatus $path $false 'stopped' "$($Profile.Label)-active-relay-stopped"
+            if (-not $connection.ReadTask.Wait(5000) -or $connection.ReadTask.GetAwaiter().GetResult() -ne 0) {
+                throw 'Active relay client was not closed cleanly by Disable.'
+            }
+            if (-not (Test-TcpPortClosed $localPort)) { throw 'Listener remained reachable after active relay Disable.' }
+        } finally {
+            if ($connection) { $connection.Client.Dispose() }
+            Stop-TestProcess $server
         }
         }
     } finally {
@@ -456,6 +618,89 @@ function Test-TunnelProfile($Profile) {
     }
 }
 
+function Test-ManagerTogglePersistence($Profile, [string]$TcExecutable, [string]$OtherTcPath, [string]$OtherSftpPath) {
+    Run-Case "$($Profile.Label) manager toggle reconnect persistence" {
+        $path = $Profile.SftpPath
+        $localPort = Get-AvailableLoopbackPort
+        $remotePort = Get-AvailableRemoteLoopbackPort $Profile.Ssh $Profile.Kind
+        $remoteServer = $null
+        Close-TestTotalCommander $TcExecutable
+        try {
+            Set-OfflineTunnelRules $Profile.Session @("- -D 127.0.0.1:${localPort}")
+            Start-TotalCommanderSessions $TcExecutable $Profile.TcPath $OtherTcPath
+            Wait-ForSession $path "$($Profile.Label) reconnect"
+            Wait-ForSession $OtherSftpPath 'Other remote reconnect'
+            $remoteServer = Start-RemoteEchoServer $Profile.Ssh $Profile.Kind $remotePort
+            Wait-ForRemoteEchoServer $remoteServer
+            Assert-TunnelStatus $path $false 'stopped' "$($Profile.Label)-sequence-reconnected"
+            Invoke-RouterTunnel manager-toggle $path '0' "$($Profile.Label)-sequence-enable" | Out-Null
+            Assert-TunnelStatus $path $true 'running' "$($Profile.Label)-sequence-running"
+            $status = Invoke-RouterTunnel status $path '-' "$($Profile.Label)-sequence-rule"
+            if ($status -notmatch [regex]::Escape("-D 127.0.0.1:${localPort}")) {
+                throw 'Runtime status did not reference the offline-edited tunnel rule.'
+            }
+            Invoke-TcpEcho $localPort $remotePort -Socks
+            Stop-TestProcess $remoteServer
+            $remoteServer = $null
+            Restart-TotalCommanderSessions $TcExecutable $Profile.TcPath $OtherTcPath
+            Wait-ForSession $path "$($Profile.Label) enabled persistence reconnect"
+            Wait-ForSession $OtherSftpPath 'Other remote enabled persistence reconnect'
+            $remoteServer = Start-RemoteEchoServer $Profile.Ssh $Profile.Kind $remotePort
+            Wait-ForRemoteEchoServer $remoteServer
+            Assert-TunnelStatus $path $true 'running' "$($Profile.Label)-enabled-persisted"
+            Invoke-TcpEcho $localPort $remotePort -Socks
+            Invoke-RouterTunnel manager-toggle $path '0' "$($Profile.Label)-sequence-disable" | Out-Null
+            Assert-TunnelStatus $path $false 'stopped' "$($Profile.Label)-sequence-stopped"
+            Restart-TotalCommanderSessions $TcExecutable $Profile.TcPath $OtherTcPath
+            Wait-ForSession $path "$($Profile.Label) disabled persistence reconnect"
+            Wait-ForSession $OtherSftpPath 'Other remote disabled persistence reconnect'
+            Assert-TunnelStatus $path $false 'stopped' "$($Profile.Label)-disabled-persisted"
+            if (-not (Test-TcpPortClosed $localPort)) { throw 'Disabled tunnel restarted after reconnect.' }
+        } finally {
+            Stop-TestProcess $remoteServer
+            Close-TestTotalCommander $TcExecutable
+            Set-OfflineTunnelRules $Profile.Session $Profile.OriginalRules
+        }
+    }
+}
+
+function Test-RemoteForwardReconnectToggle($Profile, [string]$TcExecutable, [string]$OtherTcPath, [string]$OtherSftpPath) {
+    Run-Case "$($Profile.Label) disabled reconnect manager toggle remote forwarding" {
+        $path = $Profile.SftpPath
+        $localPort = Get-AvailableLoopbackPort
+        $remotePort = Get-AvailableRemoteLoopbackPort $Profile.Ssh $Profile.Kind
+        $localServer = $null
+        $remoteClient = $null
+        Close-TestTotalCommander $TcExecutable
+        try {
+            Set-OfflineTunnelRules $Profile.Session @("- -R 127.0.0.1:${remotePort}:127.0.0.1:${localPort}")
+            Start-TotalCommanderSessions $TcExecutable $Profile.TcPath $OtherTcPath
+            Wait-ForSession $path "$($Profile.Label) remote forwarding reconnect"
+            Wait-ForSession $OtherSftpPath 'Other remote forwarding reconnect'
+            Assert-TunnelStatus $path $false 'stopped' "$($Profile.Label)-remote-manager-stopped"
+            $localServer = Start-LocalEchoServer $localPort
+            Wait-ForRemoteEchoServer $localServer
+            Invoke-RouterTunnel manager-toggle $path '0' "$($Profile.Label)-remote-manager-enable" | Out-Null
+            Assert-TunnelStatus $path $true 'running' "$($Profile.Label)-remote-manager-running"
+            $remoteClient = Start-RemoteEchoClient $Profile.Ssh $Profile.Kind $remotePort
+            Wait-RemoteEchoClient $remoteClient
+            if (-not $localServer.WaitForExit(5000) -or $localServer.ExitCode -ne 0) {
+                throw 'Manager-enabled remote forwarding did not complete the local echo exchange.'
+            }
+            Invoke-RouterTunnel manager-toggle $path '0' "$($Profile.Label)-remote-manager-disable" | Out-Null
+            Assert-TunnelStatus $path $false 'stopped' "$($Profile.Label)-remote-manager-disabled"
+            if (-not (Test-RemoteTcpPortClosed $Profile.Ssh $Profile.Kind $remotePort)) {
+                throw 'Remote forwarding listener remained reachable after manager disable.'
+            }
+        } finally {
+            Stop-TestProcess $localServer
+            Stop-TestProcess $remoteClient
+            Close-TestTotalCommander $TcExecutable
+            Set-OfflineTunnelRules $Profile.Session $Profile.OriginalRules
+        }
+    }
+}
+
 $TotalCommanderPath = [System.IO.Path]::GetFullPath($TotalCommanderPath)
 $script:Results = [System.Collections.Generic.List[object]]::new()
 $script:RunId = [Guid]::NewGuid().ToString('N').Substring(0, 12)
@@ -463,6 +708,7 @@ $script:WorkRoot = Join-Path ([System.IO.Path]::GetTempPath()) "SftpTunnelSmoke-
 $plugin = Join-Path $TotalCommanderPath 'Plugins\Wfx\SFTP'
 $script:Router = Join-Path $plugin 'SftpArchiveRouter.exe'
 $ini = Join-Path $TotalCommanderPath 'sftpplug.ini'
+$script:IniPath = $ini
 
 try {
     foreach ($path in @($script:Router, (Join-Path $plugin 'SFTPplug.wfx64'), $ini, (Join-Path $TotalCommanderPath 'TOTALCMD64.EXE'))) {
@@ -473,10 +719,10 @@ try {
     if (-not $iniData.ContainsKey($WindowsSession)) { throw 'Windows remote session is not in sftpplug.ini' }
     New-Item -ItemType Directory -Path $script:WorkRoot -Force | Out-Null
 
-    $unix = [pscustomobject]@{ Label = 'Unix remote'; Kind = 'Unix'; Ssh = Get-SshSession $iniData[$UnixSession] 'Unix remote'; SftpPath = $null; TcPath = $null; OriginalRules = @(); RulesSnapshotTaken = $false }
+    $unix = [pscustomobject]@{ Label = 'Unix remote'; Session = $UnixSession; Kind = 'Unix'; Ssh = Get-SshSession $iniData[$UnixSession] 'Unix remote'; SftpPath = $null; TcPath = $null; OriginalRules = @(); RulesSnapshotTaken = $false }
     $windowsTemp = (Invoke-RemoteCommand (Get-SshSession $iniData[$WindowsSession] 'Windows remote') (Get-WindowsRemoteCommand '[Console]::Write($env:TEMP)') | Out-String).Trim()
     if (-not $windowsTemp) { throw 'Windows remote did not return a temporary directory.' }
-    $windows = [pscustomobject]@{ Label = 'Windows remote'; Kind = 'Windows'; Ssh = Get-SshSession $iniData[$WindowsSession] 'Windows remote'; SftpPath = $null; TcPath = $null; OriginalRules = @(); RulesSnapshotTaken = $false }
+    $windows = [pscustomobject]@{ Label = 'Windows remote'; Session = $WindowsSession; Kind = 'Windows'; Ssh = Get-SshSession $iniData[$WindowsSession] 'Windows remote'; SftpPath = $null; TcPath = $null; OriginalRules = @(); RulesSnapshotTaken = $false }
     Invoke-RemoteCommand $unix.Ssh 'python3 --version' | Out-Null
     Invoke-RemoteCommand $windows.Ssh (Get-WindowsRemoteCommand '$PSVersionTable.PSVersion.ToString()') | Out-Null
 
@@ -498,6 +744,9 @@ try {
 
     Test-TunnelProfile $unix
     Test-TunnelProfile $windows
+    Test-ManagerTogglePersistence $unix $tc $windows.TcPath $windows.SftpPath
+    Test-ManagerTogglePersistence $windows $tc $unix.TcPath $unix.SftpPath
+    Test-RemoteForwardReconnectToggle $unix $tc $windows.TcPath $windows.SftpPath
 } finally {
     if (Get-Variable tc -Scope Script -ErrorAction SilentlyContinue -ValueOnly) {
         Write-Host '[INFO] Closing test Total Commander instance'

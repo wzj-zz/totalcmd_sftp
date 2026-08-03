@@ -63,8 +63,38 @@ std::wstring g_nonInteractiveError;
 
 HWND FindTotalCommanderWindow()
 {
-    HWND tcWindow = FindWindowW(L"TTOTAL_CMD64", nullptr);
-    return tcWindow ? tcWindow : FindWindowW(L"TTOTAL_CMD", nullptr);
+    const std::filesystem::path pluginDirectory(GetExecutableDirectory());
+    const std::filesystem::path tcDirectory = pluginDirectory.parent_path().parent_path().parent_path();
+    const std::wstring expected64 = (tcDirectory / L"TOTALCMD64.EXE").wstring();
+    const std::wstring expected32 = (tcDirectory / L"TOTALCMD.EXE").wstring();
+    struct SearchContext {
+        const std::wstring* expected64;
+        const std::wstring* expected32;
+        HWND window = nullptr;
+    } context{ &expected64, &expected32 };
+    EnumWindows([](HWND window, LPARAM parameter) -> BOOL {
+        auto* search = reinterpret_cast<SearchContext*>(parameter);
+        std::array<wchar_t, 64> className{};
+        if (!GetClassNameW(window, className.data(), static_cast<int>(className.size())) ||
+            (_wcsicmp(className.data(), L"TTOTAL_CMD64") != 0 && _wcsicmp(className.data(), L"TTOTAL_CMD") != 0))
+            return TRUE;
+        DWORD processId = 0;
+        GetWindowThreadProcessId(window, &processId);
+        HANDLE process = processId ? OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId) : nullptr;
+        if (!process)
+            return TRUE;
+        std::array<wchar_t, 32768> path{};
+        DWORD length = static_cast<DWORD>(path.size());
+        const bool matches = QueryFullProcessImageNameW(process, 0, path.data(), &length) &&
+            (_wcsicmp(std::wstring(path.data(), length).c_str(), search->expected64->c_str()) == 0 ||
+             _wcsicmp(std::wstring(path.data(), length).c_str(), search->expected32->c_str()) == 0);
+        CloseHandle(process);
+        if (!matches)
+            return TRUE;
+        search->window = window;
+        return FALSE;
+    }, reinterpret_cast<LPARAM>(&context));
+    return context.window;
 }
 
 int ShowRouterMessage(std::wstring_view message, std::wstring_view title, UINT flags)
@@ -248,6 +278,9 @@ enum class RouterTunnelType { local, remote, dynamic };
 struct RouterTunnelRule {
     RouterTunnelType type = RouterTunnelType::local;
     bool startOnConnect = false;
+    bool running = false;
+    bool failed = false;
+    std::wstring error;
     std::wstring bindAddress = L"0.0.0.0";
     unsigned short listenPort = 0;
     std::wstring targetHost;
@@ -325,9 +358,11 @@ std::string FormatTunnelRuleUtf8(const RouterTunnelRule& rule)
     return ToUtf8(text);
 }
 
-std::wstring DescribeTunnelRule(const RouterTunnelRule& rule)
+std::wstring DescribeTunnelRule(const RouterTunnelRule& rule, bool offline)
 {
     std::wstring text = rule.startOnConnect ? L"Enabled  " : L"Disabled ";
+    if (!offline)
+        text += rule.running ? L"Running  " : rule.failed ? L"Failed   " : L"Stopped  ";
     if (rule.type == RouterTunnelType::local) {
         text += L"Local  " + rule.bindAddress + L":" + std::to_wstring(rule.listenPort) +
             L" -> remote " + rule.targetHost + L":" + std::to_wstring(rule.targetPort);
@@ -337,6 +372,8 @@ std::wstring DescribeTunnelRule(const RouterTunnelRule& rule)
     } else {
         text += L"SOCKS5 " + rule.bindAddress + L":" + std::to_wstring(rule.listenPort);
     }
+    if (!rule.error.empty())
+        text += L"  (" + rule.error + L")";
     return text;
 }
 
@@ -512,7 +549,7 @@ void RefreshTunnelList(HWND dialog, TunnelPanelState* state)
 {
     SendDlgItemMessageW(dialog, kTunnelList, LB_RESETCONTENT, 0, 0);
     for (size_t index = 0; index < state->rules.size(); ++index) {
-        const std::wstring row = DescribeTunnelRule(state->rules[index]);
+        const std::wstring row = DescribeTunnelRule(state->rules[index], state->offline);
         SendDlgItemMessageW(dialog, kTunnelList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(row.c_str()));
     }
 }
@@ -555,22 +592,36 @@ bool LoadTunnelStatusOffline(const std::wstring& sourcePath, TunnelPanelState& s
 bool LoadTunnelStatus(const std::wstring& sourcePath, TunnelPanelState& state, std::wstring& error)
 {
     HANDLE pipe = OpenArchivePipe();
-    if (pipe == INVALID_HANDLE_VALUE)
-        return LoadTunnelStatusOffline(sourcePath, state, error);
+    if (pipe == INVALID_HANDLE_VALUE) {
+        error = L"The active Total Commander SFTP plugin service is unavailable.";
+        return false;
+    }
     std::string status;
     const bool ok = StartArchiveRequest(pipe, kArchiveTunnelStatus, sourcePath, L"", "", status);
     CloseHandle(pipe);
-    if (!ok)
-        return LoadTunnelStatusOffline(sourcePath, state, error);
+    if (!ok) {
+        if (status == "The SFTP session is not connected.")
+            return LoadTunnelStatusOffline(sourcePath, state, error);
+        error = FromUtf8(status.empty() ? "Could not read the active SSH tunnel state." : status);
+        return false;
+    }
     state.offline = false;
     state.rules.clear();
     size_t start = 0;
     while (start < status.size()) {
         const size_t end = status.find('\n', start);
         const std::string_view row(status.data() + start, (end == std::string::npos ? status.size() : end) - start);
-        if (row.size() > 2 && (row[0] == '0' || row[0] == '1') && row[1] == '\t') {
+        const size_t stateEnd = row.find('\t', 2);
+        const size_t ruleEnd = stateEnd == std::string_view::npos ? std::string_view::npos : row.find('\t', stateEnd + 1);
+        if (row.size() > 2 && (row[0] == '0' || row[0] == '1') && row[1] == '\t' &&
+            stateEnd != std::string_view::npos && ruleEnd != std::string_view::npos) {
             RouterTunnelRule rule;
-            if (ParseTunnelRule(FromUtf8(row.substr(2)), rule)) {
+            if (ParseTunnelRule(FromUtf8(row.substr(stateEnd + 1, ruleEnd - stateEnd - 1)), rule)) {
+                rule.startOnConnect = row[0] == '1';
+                const std::string_view runtime = row.substr(2, stateEnd - 2);
+                rule.running = runtime == "running";
+                rule.failed = runtime == "failed";
+                rule.error = FromUtf8(row.substr(ruleEnd + 1));
                 state.rules.push_back(std::move(rule));
             }
         }
@@ -646,11 +697,24 @@ bool SetTunnelEnabled(TunnelPanelState& state, size_t index, bool enabled, std::
     return ok;
 }
 
+bool ToggleTunnelRule(TunnelPanelState& state, size_t index, std::wstring& error)
+{
+    if (index >= state.rules.size()) {
+        error = L"Invalid SSH tunnel selection.";
+        return false;
+    }
+    const bool enabled = state.rules[index].startOnConnect;
+    return SetTunnelEnabled(state, index, !enabled, error) && LoadTunnelStatus(state.sourcePath, state, error);
+}
+
 INT_PTR CALLBACK TunnelPanelProc(HWND dialog, UINT message, WPARAM wParam, LPARAM lParam)
 {
     if (message == WM_INITDIALOG) {
         auto* state = reinterpret_cast<TunnelPanelState*>(lParam);
         SetWindowLongPtrW(dialog, DWLP_USER, lParam);
+        SetDlgItemTextW(dialog, 1000, state->offline
+            ? L"Profile is disconnected. Changes apply on the next connection."
+            : L"Profile is connected. Toggle applies immediately.");
         RefreshTunnelList(dialog, state);
         if (!state->rules.empty())
             SendDlgItemMessageW(dialog, kTunnelList, LB_SETCURSEL, 0, 0);
@@ -720,10 +784,8 @@ INT_PTR CALLBACK TunnelPanelProc(HWND dialog, UINT message, WPARAM wParam, LPARA
         return TRUE;
     }
     if (LOWORD(wParam) == kTunnelToggle || (LOWORD(wParam) == kTunnelList && HIWORD(wParam) == LBN_DBLCLK)) {
-        const bool enabled = state->rules[static_cast<size_t>(index)].startOnConnect;
         std::wstring error;
-        if (!SetTunnelEnabled(*state, static_cast<size_t>(index), !enabled, error) ||
-            !LoadTunnelStatus(state->sourcePath, *state, error)) {
+        if (!ToggleTunnelRule(*state, static_cast<size_t>(index), error)) {
             MessageBoxW(dialog, error.c_str(), L"SSH Tunnels", MB_OK | MB_ICONERROR);
             return TRUE;
         }
@@ -2353,6 +2415,28 @@ int SelfTestTunnel(const std::wstring& action, const std::wstring& path, const s
 {
     g_nonInteractive = true;
     g_nonInteractiveError.clear();
+    if (action == L"manager-toggle") {
+        wchar_t* end = nullptr;
+        const unsigned long index = wcstoul(argument.c_str(), &end, 10);
+        TunnelPanelState state;
+        state.sourcePath = path;
+        std::wstring error;
+        if (argument.empty() || *end != L'\0' || index > 63) {
+            g_nonInteractiveError = L"Tunnel manager toggle requires a rule index from 0 through 63.";
+        } else if (!LoadTunnelStatus(path, state, error)) {
+            g_nonInteractiveError = error;
+        } else if (state.offline) {
+            g_nonInteractiveError = L"Tunnel manager toggle expected a connected profile.";
+        } else if (!ToggleTunnelRule(state, index, error)) {
+            g_nonInteractiveError = error;
+        }
+        if (g_nonInteractiveError.empty())
+            return 0;
+        if (!errorPath.empty())
+            WriteUtf8TextFile(errorPath, g_nonInteractiveError);
+        WriteStdErrUtf8(g_nonInteractiveError);
+        return 1;
+    }
     HANDLE pipe = OpenArchivePipe();
     if (pipe == INVALID_HANDLE_VALUE) {
         g_nonInteractiveError = L"The installed SFTP plugin does not provide the archive service.";
@@ -2700,7 +2784,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (!argv || argc < 2) {
-        ShowError(L"Usage: SftpArchiveRouter.exe init [-y]\n       SftpArchiveRouter.exe terminal <source-path>\n       SftpArchiveRouter.exe terminal-wt <tab|split> <source-path>\n       SftpArchiveRouter.exe tunnels <source-path>\n       SftpArchiveRouter.exe prewarm <source-path>\n       SftpArchiveRouter.exe localdiff <source-path> <target-path>\n       SftpArchiveRouter.exe copy|move|delete|pack|unpack <source-path> <target-path> <selected-list>\n       SftpArchiveRouter.exe selftest-tunnel <status|replace|toggle> <sftp-path> <argument> <result-file> [error-file]");
+        ShowError(L"Usage: SftpArchiveRouter.exe init [-y]\n       SftpArchiveRouter.exe terminal <source-path>\n       SftpArchiveRouter.exe terminal-wt <tab|split> <source-path>\n       SftpArchiveRouter.exe tunnels <source-path>\n       SftpArchiveRouter.exe prewarm <source-path>\n       SftpArchiveRouter.exe localdiff <source-path> <target-path>\n       SftpArchiveRouter.exe copy|move|delete|pack|unpack <source-path> <target-path> <selected-list>\n       SftpArchiveRouter.exe selftest-tunnel <status|replace|toggle|manager-toggle> <sftp-path> <argument> <result-file> [error-file]");
         if (argv) LocalFree(argv);
         return 2;
     }
@@ -2709,7 +2793,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     if (operation == L"selftest-tunnel") {
         if (argc != 6 && argc != 7) {
             LocalFree(argv);
-            WriteStdErrUtf8(L"Usage: SftpArchiveRouter.exe selftest-tunnel <status|replace|toggle> <sftp-path> <argument> <result-file> [error-file]");
+            WriteStdErrUtf8(L"Usage: SftpArchiveRouter.exe selftest-tunnel <status|replace|toggle|manager-toggle> <sftp-path> <argument> <result-file> [error-file]");
             return 2;
         }
         const std::wstring action(argv[2]);

@@ -43,13 +43,13 @@ Total Commander WFX API
 | `Alt+F9` | Batch-delete selected SFTP files and directories with one remote `rm -rf` command. |
 | `Alt+F11` | Prewarm the current SFTP directory tree for faster native sync directory comparison. |
 | `Alt+F12` | Mirror SFTP panel directories to temporary local folders and open TC's local Synchronize Directories view. |
-| `Ctrl+P` | Manage SSH Local (`-L`), Remote (`-R`), and Dynamic SOCKS5 (`-D`) tunnels for the active SFTP session. |
+| `Ctrl+P` | Manage SSH Local (`-L`), Remote (`-R`), and Dynamic SOCKS5 (`-D`) tunnels for an SFTP profile. |
 
 The router shows a target input before each SFTP TAR operation. Pack operations default to the generated `.tar` filename; copy, move, and unpack default to the target directory. Press Enter to use the default or edit the target before continuing. Native `F5` and `F6` remain unchanged. TAR streaming requires an active SSH/SFTP session and remote `tar`; PHP Agent and LAN Pair connections are unsupported. The deployed plugin includes the `7z.exe` runtime used by `Alt+F6`; a `PATH` or `C:\Program Files\7-Zip` installation is only a fallback.
 
 ## SSH Tunnels
 
-Use **Tunnels...** in a connection's settings to enter one rule per line. `+` starts that rule after the SSH/SFTP session connects; `-` stores it disabled. `Ctrl+P` opens a per-session manager that can add, edit, remove, enable, and disable rules without reconnecting. Enable/disable changes are saved back to the session and reused on the next connect.
+Use **Tunnels...** in a connection's settings to enter one rule per line. `+` starts that rule after the primary SSH/SFTP panel session connects; `-` stores it disabled. Background transfer sessions never own tunnel listeners. `Ctrl+P` opens the profile tunnel manager and can add, edit, remove, start, and stop rules without reconnecting. Connected profiles show `Running`, `Stopped`, or `Failed`; disconnected profiles show the saved `Enabled` or `Disabled` state for the next connection. The dialog states whether Toggle applies immediately or on the next connection. Online changes are applied to the primary active session and persisted for reconnect.
 
 The `Ctrl+P` **Add...** dialog has built-in Local, Remote, and Dynamic SOCKS5 templates:
 
@@ -67,7 +67,7 @@ Profiles do not receive tunnel rules automatically. Add only the templates you n
 + -D [::1]:1080
 ```
 
-`-L` and `-R` use `[bind_address:]listen_port:target_host:target_port`; `-D` uses `[bind_address:]listen_port`. Bracket IPv6 addresses, for example `[::1]`. Remote listeners may use any address allowed by the SSH server. SSH keepalive is equivalent to `ServerAliveInterval=30`, `ServerAliveCountMax=120`, and `TCPKeepAlive=yes`.
+`-L` and `-R` use `[bind_address:]listen_port:target_host:target_port`; `-D` uses `[bind_address:]listen_port`. Bracket IPv6 addresses, for example `[::1]`. A `-L` or `-D` listener runs on the Total Commander machine. A `-R` listener runs on the SSH server and forwards back to `target_host:target_port` as seen from the Total Commander machine. Remote listeners may use only addresses allowed by the SSH server. Successful starts and stops, plus startup failures, are written to the Total Commander log. SSH keepalive is equivalent to `ServerAliveInterval=30`, `ServerAliveCountMax=120`, and `TCPKeepAlive=yes`.
 
 ## Tunnel Smoke Test
 
@@ -77,7 +77,7 @@ After deploying a Release build, verify real tunnel traffic through one Unix SSH
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\tunnel-smoke.ps1 -TotalCommanderPath '<Total Commander>' -UnixSession 'vps' -WindowsSession 'win@'
 ```
 
-The test opens both WFX sessions, temporarily replaces each profile's tunnel rules, and verifies local forwarding (`-L`), dynamic SOCKS5 (`-D`), and remote forwarding (`-R`) with real TCP echo traffic. It tests enable/disable through the router-to-WFX named-pipe path, restores the original rules in `finally`, and uses remote `127.0.0.1` listeners only. It requires Python 3 on the Unix remote and PowerShell on the Windows OpenSSH remote.
+The test opens both WFX sessions, temporarily replaces each profile's rules, and verifies `-L`, `-D`, and `-R` with real TCP echo traffic. Coverage includes manager Toggle, Enabled/Disabled reconnect persistence, startup failure and retry, active relay shutdown, multiple independent rules, and closure of local and remote listeners after Disable. The original rules are restored in `finally`. It requires Python 3 on the Unix remote and PowerShell on the Windows OpenSSH remote.
 
 `Alt+F11` runs one remote `find` command for the current SFTP directory tree and holds its names, sizes, and modification times in memory for ten minutes. Total Commander still performs its normal sync directory compare, patch selection, and copy operations through the WFX API. The cache is dropped after a successful remote write, rename, delete, move, or disconnect.
 
@@ -100,6 +100,9 @@ SFTP\
   SFTPplug.chm
   sftp.php
   language\zh-cn.lng
+  7z.exe
+  7z.dll
+  7zip-License.txt
 ```
 
 The plugin and its static dependencies use `/MT`; no VC++ Redistributable or external DLL is required.

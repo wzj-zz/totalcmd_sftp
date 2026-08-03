@@ -20,6 +20,7 @@
 #include "SftpInternal.h"
 #include "PluginEntryPoints.h"
 #include "ServerRegistry.h"
+#include "SshTunnelManager.h"
 #include "TransferUtils.h"
 #include "UnicodeHelpers.h"
 
@@ -111,6 +112,24 @@ bool ParseTunnelRuleLines(std::string_view text, std::vector<SshTunnelRule>& rul
     return ValidateSshTunnelRules(rules, error);
 }
 
+std::string SanitizeTunnelStatusText(std::string text)
+{
+    for (char& value : text) {
+        if (value == '\t' || value == '\r' || value == '\n')
+            value = ' ';
+    }
+    return text;
+}
+
+const char* TunnelRuntimeName(SshTunnelRuntimeState state)
+{
+    switch (state) {
+    case SshTunnelRuntimeState::running: return "running";
+    case SshTunnelRuntimeState::failed: return "failed";
+    default: return "stopped";
+    }
+}
+
 bool ReadExact(HANDLE pipe, void* data, DWORD length)
 {
     auto* out = static_cast<BYTE*>(data);
@@ -184,7 +203,8 @@ struct RemoteEndpoint {
     std::string remotePath;
 };
 
-bool OpenEndpoint(const std::string& virtualPath, RemoteEndpoint& endpoint, std::string& error)
+bool OpenEndpoint(const std::string& virtualPath, RemoteEndpoint& endpoint, std::string& error,
+                  bool primarySession = false)
 {
     std::string sessionName;
     std::wstring relativePath;
@@ -192,7 +212,9 @@ bool OpenEndpoint(const std::string& virtualPath, RemoteEndpoint& endpoint, std:
         error = "Invalid SFTP path.";
         return false;
     }
-    endpoint.lease = AcquireServerSessionLease(sessionName.c_str());
+    endpoint.lease = primarySession
+        ? AcquirePrimaryServerSessionLease(sessionName.c_str())
+        : AcquireServerSessionLease(sessionName.c_str());
     endpoint.cs = static_cast<pConnectSettings>(endpoint.lease.get());
     if (!endpoint.cs) {
         error = "The SFTP session is not connected.";
@@ -1278,12 +1300,23 @@ void ServeClient(HANDLE pipe)
         }
     } else if (request.operation == kArchiveTunnelStatus) {
         RemoteEndpoint endpoint;
-        if (OpenEndpoint(sourcePath, endpoint, error)) {
+        if (OpenEndpoint(sourcePath, endpoint, error, true)) {
             ok = true;
             if (ok) {
+                const std::vector<SshTunnelStatus> statuses = endpoint.cs->sshTunnelManager
+                    ? endpoint.cs->sshTunnelManager->Status()
+                    : std::vector<SshTunnelStatus>{};
                 for (size_t index = 0; index < endpoint.cs->sshTunnels.size(); ++index) {
-                    error += endpoint.cs->sshTunnels[index].startOnConnect ? "1\t" : "0\t";
+                    const SshTunnelStatus status = index < statuses.size()
+                        ? statuses[index]
+                        : SshTunnelStatus{ endpoint.cs->sshTunnels[index].startOnConnect,
+                                           SshTunnelRuntimeState::stopped, {} };
+                    error += status.desired ? "1\t" : "0\t";
+                    error += TunnelRuntimeName(status.runtime);
+                    error += '\t';
                     error += FormatSshTunnelRule(endpoint.cs->sshTunnels[index]);
+                    error += '\t';
+                    error += SanitizeTunnelStatusText(status.error);
                     error += '\n';
                 }
             }
@@ -1294,58 +1327,45 @@ void ServeClient(HANDLE pipe)
         const std::string indexText = items.substr(0, separator);
         const bool enabled = separator != std::string::npos && items.substr(separator + 1) == "1";
         const unsigned long index = strtoul(indexText.c_str(), nullptr, 10);
-        if (!OpenEndpoint(sourcePath, endpoint, error)) {
+        if (!OpenEndpoint(sourcePath, endpoint, error, true)) {
             // OpenEndpoint populated a useful active-session error.
         } else if (separator == std::string::npos || index >= endpoint.cs->sshTunnels.size()) {
             error = "Invalid SSH tunnel selection.";
         } else {
             if (!endpoint.cs->sshTunnelManager)
                 endpoint.cs->sshTunnelManager = std::make_unique<SshTunnelManager>(endpoint.cs);
-            ok = endpoint.cs->sshTunnelManager->SetEnabled(index, enabled, error);
+            const bool oldDesired = endpoint.cs->sshTunnels[index].startOnConnect;
+            endpoint.cs->sshTunnels[index].startOnConnect = enabled;
+            ok = SaveSshTunnelRules(endpoint.cs, error);
+            if (!ok)
+                endpoint.cs->sshTunnels[index].startOnConnect = oldDesired;
             if (ok) {
-                endpoint.cs->sshTunnels[index].startOnConnect = enabled;
-                ok = SaveSshTunnelRules(endpoint.cs, error);
+                std::string runtimeError;
+                const bool runtimeOk = endpoint.cs->sshTunnelManager->SetEnabled(index, enabled, runtimeError);
+                if (!runtimeOk && !enabled) {
+                    error = runtimeError;
+                    ok = false;
+                }
             }
         }
     } else if (request.operation == kArchiveTunnelReplaceRules) {
         RemoteEndpoint endpoint;
         std::vector<SshTunnelRule> rules;
-        if (!OpenEndpoint(sourcePath, endpoint, error)) {
+        if (!OpenEndpoint(sourcePath, endpoint, error, true)) {
             // OpenEndpoint populated a useful active-session error.
         } else if (!ParseTunnelRuleLines(items, rules, error)) {
             // ParseTunnelRuleLines populated a useful validation error.
         } else {
-            std::vector<SshTunnelRule> oldRules = endpoint.cs->sshTunnels;
-            if (endpoint.cs->sshTunnelManager)
-                endpoint.cs->sshTunnelManager.reset();
-            endpoint.cs->sshTunnels = std::move(rules);
-            ok = true;
-            if (!endpoint.cs->sshTunnels.empty()) {
+            const std::vector<SshTunnelRule> oldRules = endpoint.cs->sshTunnels;
+            endpoint.cs->sshTunnels = rules;
+            if (!endpoint.cs->sshTunnelManager)
                 endpoint.cs->sshTunnelManager = std::make_unique<SshTunnelManager>(endpoint.cs);
-                std::string tunnelError;
-                if (!endpoint.cs->sshTunnelManager->StartDefaults(tunnelError) && !tunnelError.empty()) {
-                    error = tunnelError;
-                    ok = false;
-                }
-            }
-            if (!ok) {
-                endpoint.cs->sshTunnelManager.reset();
-                endpoint.cs->sshTunnels = std::move(oldRules);
-                if (!endpoint.cs->sshTunnels.empty()) {
-                    endpoint.cs->sshTunnelManager = std::make_unique<SshTunnelManager>(endpoint.cs);
-                    std::string ignored;
-                    endpoint.cs->sshTunnelManager->StartDefaults(ignored);
-                }
-            }
-            if (ok && !SaveSshTunnelRules(endpoint.cs, error)) {
-                endpoint.cs->sshTunnelManager.reset();
-                endpoint.cs->sshTunnels = std::move(oldRules);
-                if (!endpoint.cs->sshTunnels.empty()) {
-                    endpoint.cs->sshTunnelManager = std::make_unique<SshTunnelManager>(endpoint.cs);
-                    std::string ignored;
-                    endpoint.cs->sshTunnelManager->StartDefaults(ignored);
-                }
-                ok = false;
+            ok = SaveSshTunnelRules(endpoint.cs, error);
+            if (!ok)
+                endpoint.cs->sshTunnels = oldRules;
+            if (ok) {
+                std::string runtimeError;
+                endpoint.cs->sshTunnelManager->ReplaceRules(rules, runtimeError);
             }
         }
     } else {

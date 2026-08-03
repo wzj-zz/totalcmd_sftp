@@ -5,8 +5,42 @@
 
 #include "SftpArchiveOpenRetry.h"
 #include "SshTunnel.h"
+#include "TunnelLog.h"
 
 namespace {
+
+unsigned g_ansiLogCalls = 0;
+unsigned g_wideLogCalls = 0;
+int g_logPlugin = 0;
+int g_logType = 0;
+std::string g_ansiLogText;
+std::wstring g_wideLogText;
+
+void WINAPI CaptureAnsiLog(int plugin, int type, LPCSTR text)
+{
+    ++g_ansiLogCalls;
+    g_logPlugin = plugin;
+    g_logType = type;
+    g_ansiLogText = text ? text : "";
+}
+
+void WINAPI CaptureWideLog(int plugin, int type, LPCWSTR text)
+{
+    ++g_wideLogCalls;
+    g_logPlugin = plugin;
+    g_logType = type;
+    g_wideLogText = text ? text : L"";
+}
+
+void ResetLogCapture()
+{
+    g_ansiLogCalls = 0;
+    g_wideLogCalls = 0;
+    g_logPlugin = 0;
+    g_logType = 0;
+    g_ansiLogText.clear();
+    g_wideLogText.clear();
+}
 
 class TestSftpHandle final : public ISftpHandle {
 public:
@@ -77,12 +111,32 @@ bool TestSshTunnelRules()
            !ParseSshTunnelRule("+ -L 8080:missing-port", invalid, error);
 }
 
+bool TestTunnelLogDispatch()
+{
+    ResetLogCapture();
+    DispatchTunnelLog(7, MSGTYPE_DETAILS, "SFTP tunnel started", CaptureAnsiLog, CaptureWideLog);
+    if (g_wideLogCalls != 1 || g_ansiLogCalls != 0 || g_logPlugin != 7 ||
+        g_logType != MSGTYPE_DETAILS || g_wideLogText != L"SFTP tunnel started")
+        return false;
+
+    ResetLogCapture();
+    DispatchTunnelLog(8, MSGTYPE_DETAILS, "SFTP tunnel stopped", CaptureAnsiLog, nullptr);
+    if (g_ansiLogCalls != 1 || g_wideLogCalls != 0 || g_logPlugin != 8 ||
+        g_logType != MSGTYPE_DETAILS || g_ansiLogText != "SFTP tunnel stopped")
+        return false;
+
+    ResetLogCapture();
+    DispatchTunnelLog(9, MSGTYPE_IMPORTANTERROR, "SFTP tunnel startup failed", nullptr, CaptureWideLog);
+    return g_wideLogCalls == 1 && g_ansiLogCalls == 0 && g_logPlugin == 9 &&
+        g_logType == MSGTYPE_IMPORTANTERROR && g_wideLogText == L"SFTP tunnel startup failed";
+}
+
 } // namespace
 
 int main()
 {
-    if (TestEagainRetriesTheSameStagingPath() && TestSshTunnelRules())
+    if (TestEagainRetriesTheSameStagingPath() && TestSshTunnelRules() && TestTunnelLogDispatch())
         return 0;
-    std::fputs("SFTP archive retry or SSH tunnel rule test failed.\n", stderr);
+    std::fputs("SFTP archive retry, SSH tunnel rule, or tunnel log test failed.\n", stderr);
     return 1;
 }

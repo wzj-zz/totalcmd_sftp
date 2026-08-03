@@ -97,6 +97,7 @@ struct tConnectSettings {
     bool scpfordata;
     bool dialogforconnection;
     bool saveonlyprofile;   // quick dialog: save named profile without immediate connect
+    bool primarySession = false; // owns profile-level services such as SSH tunnels
     bool compressed;
     bool detailedlog;
     bool neednewchannel;   // kill the sftp channel in case of an error
@@ -173,7 +174,8 @@ struct tConnectSettings {
 
 using pConnectSettings = tConnectSettings*;
 
-pConnectSettings SftpConnectToServer(LPCSTR DisplayName, LPCSTR inifilename, LPCSTR overridepass);
+pConnectSettings SftpConnectToServer(LPCSTR DisplayName, LPCSTR inifilename, LPCSTR overridepass,
+                                     bool primarySession = true);
 void SftpGetServerBasePathW(LPCWSTR DisplayName, LPWSTR RelativePath, size_t maxlen, LPCSTR inifilename);
 bool SftpConfigureServer(LPCSTR DisplayName, LPCSTR inifilename);
 int  SftpCloseConnection(pConnectSettings ConnectSettings);

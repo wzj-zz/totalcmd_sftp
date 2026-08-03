@@ -195,6 +195,7 @@
     <ClCompile Include="..\src\core\TrustedInstallerToken.cpp" />
     <ClCompile Include="..\src\core\SftpArchivePipe.cpp" />
     <ClCompile Include="..\src\core\SshTunnel.cpp" />
+    <ClCompile Include="..\src\core\TunnelLog.cpp" />
     <ClCompile Include="..\src\core\SshTunnelManager.cpp">
       <!-- Avoid an MSVC 14.51 LTCG internal compiler error in the tunnel worker state machine. -->
       <WholeProgramOptimization>false</WholeProgramOptimization>
@@ -248,6 +249,7 @@
     <ClInclude Include="..\src\include\SftpArchivePipe.h" />
     <ClInclude Include="..\src\include\SftpArchiveOpenRetry.h" />
     <ClInclude Include="..\src\include\SshTunnel.h" />
+    <ClInclude Include="..\src\include\TunnelLog.h" />
     <ClInclude Include="..\src\include\SshTunnelManager.h" />
     <ClInclude Include="..\src\include\libssh2\libssh2.h" />
     <ClInclude Include="..\src\include\libssh2\libssh2_sftp.h" />

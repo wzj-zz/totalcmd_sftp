@@ -57,15 +57,15 @@ SftpArchiveRouter.exe init -y
 | `Alt+F9` | 对选中的 SFTP 文件和目录执行远端批量删除。 |
 | `Alt+F11` | 预热当前 SFTP 目录树，加速 Total Commander 原生同步目录比较。 |
 | `Alt+F12` | 将 SFTP 面板目录镜像到本地临时目录，并打开 Total Commander 本地 Synchronize Directories 窗口。 |
-| `Ctrl+P` | 管理当前 SFTP session 的 SSH Local、Remote 和 Dynamic SOCKS5 隧道。 |
+| `Ctrl+P` | 管理一个 SFTP profile 的 SSH Local、Remote 和 Dynamic SOCKS5 隧道。 |
 
 Router 会在每次 SFTP TAR 操作前弹出目标输入框。Pack 默认目标是生成的 `.tar` 文件名；copy、move 和 unpack 默认目标是目标目录。按 Enter 使用默认值，也可以编辑目标后继续。原生 `F5` 和 `F6` 不会被覆盖。TAR streaming 需要活动 SSH/SFTP session 和远端 `tar`；PHP Agent 和 LAN Pair 不支持该路径。部署包自带 `Alt+F6` 所需的 `7z.exe` 运行时；`PATH` 或 `C:\Program Files\7-Zip` 中的安装仅作为后备。
 
 ## SSH 隧道
 
-连接设置里的 **Tunnels...** 可以手写一行一条规则。`+` 表示 SSH/SFTP session 连接后自动启动；`-` 表示保存但保持关闭。
+连接设置里的 **Tunnels...** 可以手写一行一条规则。`+` 表示主 SSH/SFTP 面板 session 连接后自动启动；`-` 表示保存但保持关闭。后台传输 session 不会持有隧道 listener。
 
-`Ctrl+P` 会打开当前 session 的隧道管理器，可以在不重连的情况下新增、编辑、删除、启用和禁用规则。启用/禁用会写回该 session 的配置，下次连接时继续沿用。
+`Ctrl+P` 会打开当前 profile 的隧道管理器，可以在不重连的情况下新增、编辑、删除、启动和停止规则。profile 已连接时显示真实的 `Running`、`Stopped` 或 `Failed` 状态；未连接时显示下次连接使用的 `Enabled` 或 `Disabled` 保存状态。窗口会明确提示 Toggle 是立即应用，还是在下次连接时应用。在线修改会立即作用于当前主 session，并写回配置供重连继续沿用。
 
 `Ctrl+P` 的 **Add...** 窗口内置三类模板：
 
@@ -99,6 +99,8 @@ Profile 不会自动获得这些规则。需要哪条就点 **Add...** 按模板
 
 IPv6 地址需要加方括号，例如 `[::1]`。
 
+`-L` 和 `-D` 的 listener 位于运行 Total Commander 的本机。`-R` 的 listener 位于 SSH 服务器，连接到它的流量会通过当前 SSH session 转发回 Total Commander 本机看到的 `target_host:target_port`。远端是否允许指定监听地址取决于 SSH 服务器配置。成功启动、停止和启动失败都会写入 Total Commander 日志。
+
 ## 隧道 Smoke Test
 
 部署 Release build 后，可使用一个 Unix SSH/SFTP profile 和一个 Windows OpenSSH/SFTP profile 验证真实隧道流量：
@@ -107,7 +109,7 @@ IPv6 地址需要加方括号，例如 `[::1]`。
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\tunnel-smoke.ps1 -TotalCommanderPath '<Total Commander>' -UnixSession 'vps' -WindowsSession 'win@'
 ```
 
-该测试会打开两个 WFX session，临时替换每个 profile 的隧道规则，并用真实 TCP echo 流量验证 Local forwarding (`-L`)、Dynamic SOCKS5 (`-D`) 和 Remote forwarding (`-R`)。它经由 router 到 WFX 的 named-pipe 路径测试启用和禁用，`finally` 中恢复原规则，并且只使用远端 `127.0.0.1` listener。Unix 远端需要 Python 3，Windows OpenSSH 远端需要 PowerShell。
+该测试会打开两个 WFX session，临时替换每个 profile 的规则，并用真实 TCP echo 流量验证 `-L`、`-D` 和 `-R`。覆盖 manager Toggle、Enabled/Disabled 重连持久化、启动失败与重试、活动 relay 关闭、多规则独立性，以及 Disable 后本地和远端 listener 确实关闭。原规则会在 `finally` 中恢复。Unix 远端需要 Python 3，Windows OpenSSH 远端需要 PowerShell。
 
 `0.0.0.0` 表示监听所有网卡，允许其它设备通过这台机器的 IP 访问；只想允许本机访问时应使用 `127.0.0.1`。Remote listener 是否允许 `0.0.0.0` 还取决于 SSH 服务器配置，例如 `GatewayPorts`。
 
@@ -144,6 +146,9 @@ SFTP\
   SFTPplug.chm
   sftp.php
   language\zh-cn.lng
+  7z.exe
+  7z.dll
+  7zip-License.txt
 ```
 
 插件和静态依赖使用 `/MT`，不需要额外安装 VC++ Redistributable 或外部 DLL。

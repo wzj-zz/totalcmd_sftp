@@ -14,12 +14,19 @@
 #include "SftpInternal.h"
 #include "PluginEntryPoints.h"
 #include "SshTunnelManager.h"
+#include "TunnelLog.h"
 
 namespace {
 
 constexpr int kTunnelBacklog = 16;
 constexpr DWORD kTunnelPollMs = 100;
 constexpr DWORD kRemoteForwardRetryMs = 3000;
+constexpr DWORD kTunnelStopTimeoutMs = 3000;
+
+void LogTunnelMessage(int messageType, const std::string& message)
+{
+    DispatchTunnelLog(PluginNumber, messageType, message, LogProc, LogProcW);
+}
 
 std::string TunnelDescription(const SshTunnelRule& rule)
 {
@@ -29,20 +36,35 @@ std::string TunnelDescription(const SshTunnelRule& rule)
 
 void LogTunnelStartFailed(const tConnectSettings* session, const std::string& error)
 {
-    if (LogProc) {
-        const std::string message = "SFTP tunnel startup failed for '" +
-            (session ? session->DisplayName : std::string("(unknown)")) + "': " + error;
-        LogProc(PluginNumber, MSGTYPE_IMPORTANTERROR, message.c_str());
-    }
+    const std::string message = "SFTP tunnel startup failed for '" +
+        (session ? session->DisplayName : std::string("(unknown)")) + "': " + error;
+    LogTunnelMessage(MSGTYPE_IMPORTANTERROR, message);
 }
 
 void LogTunnelStarted(const tConnectSettings* session, const SshTunnelRule& rule)
 {
-    if (LogProc) {
-        const std::string message = "SFTP tunnel started for '" +
-            (session ? session->DisplayName : std::string("(unknown)")) + "': " + TunnelDescription(rule);
-        LogProc(PluginNumber, MSGTYPE_DETAILS, message.c_str());
-    }
+    const std::string message = "SFTP tunnel started for '" +
+        (session ? session->DisplayName : std::string("(unknown)")) + "': " + TunnelDescription(rule);
+    LogTunnelMessage(MSGTYPE_DETAILS, message);
+}
+
+void LogTunnelStopped(const tConnectSettings* session, const SshTunnelRule& rule)
+{
+    const std::string message = "SFTP tunnel stopped for '" +
+        (session ? session->DisplayName : std::string("(unknown)")) + "': " + TunnelDescription(rule);
+    LogTunnelMessage(MSGTYPE_DETAILS, message);
+}
+
+bool SameTunnelEndpoint(const SshTunnelRule& left, const SshTunnelRule& right)
+{
+    return left.type == right.type && _stricmp(left.bindAddress.c_str(), right.bindAddress.c_str()) == 0 &&
+        left.listenPort == right.listenPort && _stricmp(left.targetHost.c_str(), right.targetHost.c_str()) == 0 &&
+        left.targetPort == right.targetPort;
+}
+
+bool SameTunnelRule(const SshTunnelRule& left, const SshTunnelRule& right)
+{
+    return left.startOnConnect == right.startOnConnect && SameTunnelEndpoint(left, right);
 }
 
 void CloseSocket(SOCKET& socket) noexcept
@@ -198,7 +220,15 @@ bool SendSocksReply(SOCKET socket, unsigned char code)
     return SendAll(socket, reinterpret_cast<const char*>(reply), sizeof(reply));
 }
 
-void Relay(pConnectSettings session, SOCKET local, std::unique_ptr<ISshChannel> channel, std::atomic<bool>& stop)
+void SetTunnelSocketTimeouts(SOCKET socket)
+{
+    const DWORD timeout = kTunnelPollMs;
+    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+    setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+}
+
+void Relay(pConnectSettings session, SOCKET local, std::unique_ptr<ISshChannel> channel, std::atomic<bool>& stop,
+           std::mutex& socketMutex, std::vector<SOCKET>& sockets)
 {
     std::array<char, 64 * 1024> buffer{};
     while (!stop.load(std::memory_order_acquire)) {
@@ -238,6 +268,12 @@ void Relay(pConnectSettings session, SOCKET local, std::unique_ptr<ISshChannel> 
         }
     }
 done:
+    {
+        std::lock_guard<std::mutex> lock(socketMutex);
+        const auto found = std::find(sockets.begin(), sockets.end(), local);
+        if (found != sockets.end())
+            sockets.erase(found);
+    }
     CloseSocket(local);
     // Channel destruction sends SSH close packets, so it must use the same
     // serialization as every other libssh2 call on this shared session.
@@ -298,8 +334,9 @@ struct SshTunnelManager::Tunnel {
     std::unique_ptr<ISshForwardListener> remoteListener;
     std::thread listenerThread;
     std::vector<std::thread> relayThreads;
+    std::vector<SOCKET> relaySockets;
     std::atomic<bool> stop{ false };
-    std::atomic<bool> running{ false };
+    std::atomic<SshTunnelRuntimeState> runtime{ SshTunnelRuntimeState::stopped };
     std::string error;
     std::mutex mutex;
 };
@@ -319,12 +356,13 @@ SshTunnelManager::~SshTunnelManager()
 
 bool SshTunnelManager::StartDefaults(std::string& error)
 {
+    std::lock_guard<std::mutex> managerLock(mutex_);
     bool allStarted = true;
     for (size_t index = 0; index < tunnels_.size(); ++index) {
         if (!tunnels_[index]->rule.startOnConnect)
             continue;
         std::string ruleError;
-        if (!SetEnabled(index, true, ruleError)) {
+        if (!StartTunnel(*tunnels_[index], ruleError)) {
             allStarted = false;
             if (error.empty())
                 error = std::move(ruleError);
@@ -335,30 +373,54 @@ bool SshTunnelManager::StartDefaults(std::string& error)
 
 bool SshTunnelManager::SetEnabled(size_t index, bool enabled, std::string& error)
 {
+    std::lock_guard<std::mutex> managerLock(mutex_);
     if (!session_ || index >= tunnels_.size()) {
         error = "Tunnel rule is unavailable.";
         LogTunnelStartFailed(session_, error);
         return false;
     }
     Tunnel& tunnel = *tunnels_[index];
-    if (!enabled) {
-        tunnel.stop.store(true, std::memory_order_release);
-        CloseSocket(tunnel.localListener);
-        if (tunnel.remoteListener) {
-            ScopedSshSessionUse use(session_);
-            while (tunnel.remoteListener->cancel() == LIBSSH2_ERROR_EAGAIN)
-                WaitForSshIo(session_, kTunnelPollMs);
-        }
-        if (tunnel.listenerThread.joinable())
-            tunnel.listenerThread.join();
-        tunnel.remoteListener.reset();
-        for (std::thread& worker : tunnel.relayThreads)
-            if (worker.joinable()) worker.join();
-        tunnel.relayThreads.clear();
-        tunnel.running.store(false, std::memory_order_release);
-        return true;
+    tunnel.rule.startOnConnect = enabled;
+    return enabled ? StartTunnel(tunnel, error) : StopTunnel(tunnel, error);
+}
+
+bool SshTunnelManager::StopTunnel(Tunnel& tunnel, std::string& error) noexcept
+{
+    const bool wasRunning = tunnel.runtime.load(std::memory_order_acquire) == SshTunnelRuntimeState::running;
+    tunnel.stop.store(true, std::memory_order_release);
+    CloseSocket(tunnel.localListener);
+    {
+        std::lock_guard<std::mutex> lock(tunnel.mutex);
+        for (SOCKET socket : tunnel.relaySockets)
+            shutdown(socket, SD_BOTH);
     }
-    if (tunnel.running.load(std::memory_order_acquire))
+    if (tunnel.remoteListener) {
+        ScopedSshSessionUse use(session_);
+        const SYSTICKS start = get_sys_ticks();
+        while (tunnel.remoteListener->cancel() == LIBSSH2_ERROR_EAGAIN) {
+            if (get_ticks_between(start) >= kTunnelStopTimeoutMs) {
+                error = "Timed out while stopping remote tunnel " + TunnelDescription(tunnel.rule) + ".";
+                break;
+            }
+            WaitForSshIo(session_, kTunnelPollMs);
+        }
+    }
+    if (tunnel.listenerThread.joinable())
+        tunnel.listenerThread.join();
+    tunnel.remoteListener.reset();
+    for (std::thread& worker : tunnel.relayThreads)
+        if (worker.joinable()) worker.join();
+    tunnel.relayThreads.clear();
+    tunnel.runtime.store(SshTunnelRuntimeState::stopped, std::memory_order_release);
+    tunnel.error = error;
+    if (wasRunning)
+        LogTunnelStopped(session_, tunnel.rule);
+    return error.empty();
+}
+
+bool SshTunnelManager::StartTunnel(Tunnel& tunnel, std::string& error)
+{
+    if (tunnel.runtime.load(std::memory_order_acquire) == SshTunnelRuntimeState::running)
         return true;
     tunnel.error.clear();
     tunnel.stop.store(false, std::memory_order_release);
@@ -369,6 +431,7 @@ bool SshTunnelManager::SetEnabled(size_t index, bool enabled, std::string& error
             error = "SSH server refused remote tunnel " + TunnelDescription(tunnel.rule) +
                 ". The remote listen port may still be releasing, already in use, or blocked by the server's remote forwarding policy.";
             tunnel.error = error;
+            tunnel.runtime.store(SshTunnelRuntimeState::failed, std::memory_order_release);
             LogTunnelStartFailed(session_, error);
             return false;
         }
@@ -386,13 +449,20 @@ bool SshTunnelManager::SetEnabled(size_t index, bool enabled, std::string& error
                 SOCKET local = ConnectTcp(tunnel.rule.targetHost, tunnel.rule.targetPort);
                 if (local == INVALID_SOCKET)
                     continue;
-                tunnel.relayThreads.emplace_back(Relay, session_, local, std::move(channel), std::ref(tunnel.stop));
+                SetTunnelSocketTimeouts(local);
+                {
+                    std::lock_guard<std::mutex> lock(tunnel.mutex);
+                    tunnel.relaySockets.push_back(local);
+                }
+                tunnel.relayThreads.emplace_back(Relay, session_, local, std::move(channel), std::ref(tunnel.stop),
+                                                 std::ref(tunnel.mutex), std::ref(tunnel.relaySockets));
             }
         });
     } else {
         tunnel.localListener = CreateListener(tunnel.rule.bindAddress, tunnel.rule.listenPort, error);
         if (tunnel.localListener == INVALID_SOCKET) {
             tunnel.error = error;
+            tunnel.runtime.store(SshTunnelRuntimeState::failed, std::memory_order_release);
             LogTunnelStartFailed(session_, error);
             return false;
         }
@@ -403,6 +473,7 @@ bool SshTunnelManager::SetEnabled(size_t index, bool enabled, std::string& error
                 SOCKET local = accept(tunnel.localListener, nullptr, nullptr);
                 if (local == INVALID_SOCKET)
                     continue;
+                SetTunnelSocketTimeouts(local);
                 std::string host = tunnel.rule.targetHost;
                 unsigned short port = tunnel.rule.targetPort;
                 if (tunnel.rule.type == SshTunnelType::dynamic) {
@@ -424,36 +495,84 @@ bool SshTunnelManager::SetEnabled(size_t index, bool enabled, std::string& error
                     CloseSocket(local);
                     continue;
                 }
-                tunnel.relayThreads.emplace_back(Relay, session_, local, std::move(channel), std::ref(tunnel.stop));
+                {
+                    std::lock_guard<std::mutex> lock(tunnel.mutex);
+                    tunnel.relaySockets.push_back(local);
+                }
+                tunnel.relayThreads.emplace_back(Relay, session_, local, std::move(channel), std::ref(tunnel.stop),
+                                                 std::ref(tunnel.mutex), std::ref(tunnel.relaySockets));
             }
         });
     }
-    tunnel.running.store(true, std::memory_order_release);
+    tunnel.runtime.store(SshTunnelRuntimeState::running, std::memory_order_release);
     LogTunnelStarted(session_, tunnel.rule);
+    return true;
+}
+
+bool SshTunnelManager::ReplaceRules(const std::vector<SshTunnelRule>& rules, std::string& error)
+{
+    std::lock_guard<std::mutex> managerLock(mutex_);
+    std::vector<int> matches(rules.size(), -1);
+    std::vector<bool> used(tunnels_.size(), false);
+    const size_t common = (std::min)(tunnels_.size(), rules.size());
+    for (size_t index = 0; index < common; ++index) {
+        if (SameTunnelRule(tunnels_[index]->rule, rules[index])) {
+            matches[index] = static_cast<int>(index);
+            used[index] = true;
+        }
+    }
+    for (size_t ruleIndex = 0; ruleIndex < rules.size(); ++ruleIndex) {
+        if (matches[ruleIndex] >= 0)
+            continue;
+        for (size_t tunnelIndex = 0; tunnelIndex < tunnels_.size(); ++tunnelIndex) {
+            if (!used[tunnelIndex] && SameTunnelRule(tunnels_[tunnelIndex]->rule, rules[ruleIndex])) {
+                matches[ruleIndex] = static_cast<int>(tunnelIndex);
+                used[tunnelIndex] = true;
+                break;
+            }
+        }
+    }
+    for (size_t index = 0; index < tunnels_.size(); ++index) {
+        if (used[index])
+            continue;
+        std::string ignored;
+        StopTunnel(*tunnels_[index], ignored);
+    }
+    std::vector<std::unique_ptr<Tunnel>> updated;
+    updated.reserve(rules.size());
+    for (size_t index = 0; index < rules.size(); ++index) {
+        if (matches[index] >= 0) {
+            updated.push_back(std::move(tunnels_[static_cast<size_t>(matches[index])]));
+            continue;
+        }
+        auto tunnel = std::make_unique<Tunnel>(rules[index]);
+        if (tunnel->rule.startOnConnect && !StartTunnel(*tunnel, tunnel->error)) {
+            if (error.empty())
+                error = tunnel->error;
+        }
+        updated.push_back(std::move(tunnel));
+    }
+    tunnels_ = std::move(updated);
     return true;
 }
 
 void SshTunnelManager::StopAll() noexcept
 {
+    std::lock_guard<std::mutex> managerLock(mutex_);
     std::string ignored;
-    for (size_t index = 0; index < tunnels_.size(); ++index)
-        SetEnabled(index, false, ignored);
+    for (const auto& tunnel : tunnels_)
+        StopTunnel(*tunnel, ignored);
 }
 
-std::vector<bool> SshTunnelManager::Running() const
+std::vector<SshTunnelStatus> SshTunnelManager::Status() const
 {
-    std::vector<bool> result;
+    std::lock_guard<std::mutex> managerLock(mutex_);
+    std::vector<SshTunnelStatus> result;
     result.reserve(tunnels_.size());
-    for (const auto& tunnel : tunnels_)
-        result.push_back(tunnel->running.load(std::memory_order_acquire));
-    return result;
-}
-
-std::vector<std::string> SshTunnelManager::Errors() const
-{
-    std::vector<std::string> result;
-    result.reserve(tunnels_.size());
-    for (const auto& tunnel : tunnels_)
-        result.push_back(tunnel->error);
+    for (const auto& tunnel : tunnels_) {
+        result.push_back({ tunnel->rule.startOnConnect,
+                           tunnel->runtime.load(std::memory_order_acquire),
+                           tunnel->error });
+    }
     return result;
 }

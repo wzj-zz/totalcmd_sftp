@@ -17,6 +17,7 @@ public:
 
 private:
     friend ServerSessionLease AcquireServerSessionLease(LPCSTR name) noexcept;
+    friend ServerSessionLease AcquirePrimaryServerSessionLease(LPCSTR name) noexcept;
     explicit ServerSessionLease(LPVOID entry, SERVERID serverid) noexcept
         : entry_(entry), serverid_(serverid) {}
     void reset() noexcept;
@@ -49,6 +50,8 @@ SERVERID GetServerIdFromAnyThread(LPCSTR servername) noexcept;
 // Keeps an active session alive until the returned lease is released. Use this
 // for long-running cross-thread work instead of retaining a raw SERVERID.
 ServerSessionLease AcquireServerSessionLease(LPCSTR servername) noexcept;
+// Selects the primary Total Commander session, never a background transfer session.
+ServerSessionLease AcquirePrimaryServerSessionLease(LPCSTR servername) noexcept;
 bool SetServerIdForName(LPCSTR displayname, SERVERID newid) noexcept;
 
 // Path helpers

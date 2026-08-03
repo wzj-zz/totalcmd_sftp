@@ -414,7 +414,7 @@ int WINAPI FsRenMovFileW(LPCWSTR OldName, LPCWSTR NewName, BOOL Move, BOOL OverW
             serverid1 = static_cast<pConnectSettings>(GetServerIdFromAnyThread(sourceName.data()));
         std::unique_ptr<tConnectSettings, decltype(&CloseTemporaryConnection)> temporarySource(nullptr, CloseTemporaryConnection);
         if (!serverid1 && sourceName[0]) {
-            serverid1 = SftpConnectToServer(sourceName.data(), inifilename, nullptr);
+            serverid1 = SftpConnectToServer(sourceName.data(), inifilename, nullptr, false);
             if (serverid1)
                 temporarySource.reset(serverid1);
         }
@@ -424,7 +424,7 @@ int WINAPI FsRenMovFileW(LPCWSTR OldName, LPCWSTR NewName, BOOL Move, BOOL OverW
             serverid2 = static_cast<pConnectSettings>(GetServerIdFromAnyThread(targetName.data()));
         std::unique_ptr<tConnectSettings, decltype(&CloseTemporaryConnection)> temporaryTarget(nullptr, CloseTemporaryConnection);
         if (!serverid2 && targetName[0]) {
-            serverid2 = SftpConnectToServer(targetName.data(), inifilename, nullptr);
+            serverid2 = SftpConnectToServer(targetName.data(), inifilename, nullptr, false);
             if (serverid2)
                 temporaryTarget.reset(serverid2);
         }
@@ -573,7 +573,7 @@ int WINAPI FsGetFileW(LPCWSTR RemoteName, LPWSTR LocalName, int CopyFlags, Remot
         std::unique_ptr<tConnectSettings, decltype(&CloseTemporaryConnection)> temporarySource(nullptr, CloseTemporaryConnection);
         if (!serverid && sourceName[0] != '\0') {
             LogMsg("Remote copy source session '%s' is not active; opening a temporary connection.", sourceName.data());
-            serverid = SftpConnectToServer(sourceName.data(), inifilename, nullptr);
+            serverid = SftpConnectToServer(sourceName.data(), inifilename, nullptr, false);
             if (serverid)
                 temporarySource.reset(serverid);
         }
@@ -596,7 +596,7 @@ int WINAPI FsGetFileW(LPCWSTR RemoteName, LPWSTR LocalName, int CopyFlags, Remot
         std::unique_ptr<tConnectSettings, decltype(&CloseTemporaryConnection)> temporaryTarget(nullptr, CloseTemporaryConnection);
         if (virtualTarget && !targetServer && targetName[0] != '\0') {
             LogMsg("Remote copy target session '%s' is not active; opening a temporary connection.", targetName.data());
-            targetServer = SftpConnectToServer(targetName.data(), inifilename, nullptr);
+            targetServer = SftpConnectToServer(targetName.data(), inifilename, nullptr, false);
             if (targetServer)
                 temporaryTarget.reset(targetServer);
         }

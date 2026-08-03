@@ -3160,9 +3160,11 @@ bool ShowConnectDialog(pConnectSettings ConnectSettings, LPCSTR DisplayName, LPC
 #define HWND_MESSAGE ((HWND)(-3))
 #endif
 
-pConnectSettings SftpConnectToServer(LPCSTR DisplayName, LPCSTR inifilename, LPCSTR overridepass)
+pConnectSettings SftpConnectToServer(LPCSTR DisplayName, LPCSTR inifilename, LPCSTR overridepass,
+                                     bool primarySession)
 {
     tConnectSettings ConnectSettings{};
+    ConnectSettings.primarySession = primarySession;
     ConnectSettings.sock = INVALID_SOCKET; // Zabezpieczenie przed zamykaniem gniazda 0 przez PHP Agent
     ConnectSettings.feedback = std::make_unique<WindowsUserFeedback>();
     ConnectSettings.dialogforconnection = true;

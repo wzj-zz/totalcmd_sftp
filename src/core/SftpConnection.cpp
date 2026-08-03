@@ -329,7 +329,9 @@ void StartSshSessionServices(pConnectSettings cs) noexcept
         return;
 
     StartSshKeepAlive(cs);
-    if (cs->sshTunnelManager || cs->sshTunnels.empty())
+    // Tunnel listeners belong to the primary panel connection. Background
+    // transfer sessions must never create a second owner for the same profile.
+    if (!cs->primarySession || cs->sshTunnelManager || cs->sshTunnels.empty())
         return;
 
     try {

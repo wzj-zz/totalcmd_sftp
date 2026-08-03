@@ -721,7 +721,7 @@ void WINAPI FsStatusInfo(LPCSTR RemoteDir, int InfoStartEnd, int InfoOperation)
                 if (!oldpass[0])
                     oldpass = nullptr;
             }
-            pConnectSettings serverid = SftpConnectToServer(displayName.data(), inifilename, oldpass);
+            pConnectSettings serverid = SftpConnectToServer(displayName.data(), inifilename, oldpass, false);
             if (serverid)
                 SetServerIdForName(displayName.data(), static_cast<SERVERID>(serverid));
         }

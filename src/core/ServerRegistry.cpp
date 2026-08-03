@@ -121,6 +121,21 @@ ServerSessionLease AcquireServerSessionLease(LPCSTR name) noexcept
     return {};
 }
 
+ServerSessionLease AcquirePrimaryServerSessionLease(LPCSTR name) noexcept
+{
+    if (!name || !name[0])
+        return {};
+    std::lock_guard<std::mutex> lock(g_registryMutex);
+    for (const auto& entry : g_servers) {
+        if (!entry->closing && !entry->is_background && entry->serverid &&
+            _stricmp(entry->name.c_str(), name) == 0) {
+            ++entry->leases;
+            return ServerSessionLease(entry.get(), entry->serverid);
+        }
+    }
+    return {};
+}
+
 bool SetServerIdForName(LPCSTR name, SERVERID id) noexcept
 {
     if (!name || !name[0])
@@ -131,9 +146,19 @@ bool SetServerIdForName(LPCSTR name, SERVERID id) noexcept
     {
         std::unique_lock<std::mutex> lock(g_registryMutex);
         DWORD tid = GetCurrentThreadId();
-        bool is_bg = (tid != mainthreadid);
-        
-        SERVERENTRY* entry = FindEntry(tid, name, is_bg);
+        const bool is_bg = id ? !static_cast<pConnectSettings>(id)->primarySession
+                              : (tid != mainthreadid);
+        SERVERENTRY* entry = nullptr;
+        if (!id) {
+            for (const auto& candidate : g_servers) {
+                if (candidate->threadid == tid && _stricmp(candidate->name.c_str(), name) == 0) {
+                    entry = candidate.get();
+                    break;
+                }
+            }
+        }
+        if (!entry)
+            entry = FindEntry(tid, name, is_bg);
         
         if (entry) {
             if (entry->serverid != id) {
