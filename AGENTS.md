@@ -14,6 +14,11 @@
 
 - Keep `README.md` and `README.zh-CN.md` in sync for user-facing behavior, shortcuts, deployment, and testing instructions. When changing one README, check whether the same user-visible information must be updated in the other before finishing or committing.
 
+## Collaboration
+
+- Before a long-running build, deployment, smoke test, or diagnosis, state what is being run. As soon as it returns, immediately report whether it passed, failed, or timed out before doing cleanup, investigation, or commit work. Do not require the user to interrupt to obtain test status.
+- On a test failure, state the failed check and that no deployment, package update, or commit will proceed until it is resolved. For extended investigation, provide concise progress updates rather than working silently.
+
 ## Post-Deploy Archive Smoke Tests
 
 - Standard flow when the user supplies only `<Total Commander>`: run the default preflight below, build Release, deploy the generated `SFTP\` package, then run the default smoke command. Do not rediscover the script parameters or ask for target names when preflight passes.
