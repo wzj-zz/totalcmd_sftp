@@ -286,8 +286,8 @@
       <DeploySevenZipRuntime Include="$(MSBuildThisFileDirectory)..\src\archive-router\runtime\7zip\7z.exe" />
       <DeploySevenZipRuntime Include="$(MSBuildThisFileDirectory)..\src\archive-router\runtime\7zip\7z.dll" />
     </ItemGroup>
+    <RemoveDir Directories="$(DeployPackageDir)" />
     <MakeDir Directories="$(DeployPackageDir);$(DeployPackageDir)language" />
-    <Delete Files="$(DeployPackageDir)Initialize-SftpArchiveRouter.ps1" />
     <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(DeployPackageDir)SFTPplug.wfx64" />
     <Copy SourceFiles="$(MSBuildThisFileDirectory)bin\x64_Release\SftpArchiveRouter.exe" DestinationFiles="$(DeployPackageDir)SftpArchiveRouter.exe" />
     <Copy SourceFiles="$(MSBuildThisFileDirectory)..\src\help\sftpplug.chm" DestinationFiles="$(DeployPackageDir)SFTPplug.chm" />

@@ -9,6 +9,46 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+$script:ExternalProcessTimeoutMs = 120000
+
+function Stop-TestProcess([System.Diagnostics.Process]$Process) {
+    if (-not $Process) { return }
+    try {
+        if (-not $Process.HasExited) {
+            $Process.Kill($true)
+            $Process.WaitForExit(5000)
+        }
+    } catch [System.InvalidOperationException] {
+    } finally {
+        $Process.Dispose()
+    }
+}
+
+function Invoke-ExternalProcess([string]$FileName, [string[]]$Arguments, [int]$TimeoutMs = $script:ExternalProcessTimeoutMs) {
+    $info = [System.Diagnostics.ProcessStartInfo]::new()
+    $info.FileName = $FileName
+    $info.UseShellExecute = $false
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    foreach ($argument in $Arguments) { [void]$info.ArgumentList.Add($argument) }
+    $process = [System.Diagnostics.Process]::Start($info)
+    try {
+        $outputTask = $process.StandardOutput.ReadToEndAsync()
+        $errorTask = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($TimeoutMs)) {
+            Stop-TestProcess $process
+            throw "$FileName timed out after $($TimeoutMs / 1000) seconds."
+        }
+        [pscustomobject]@{
+            ExitCode = $process.ExitCode
+            Output = $outputTask.GetAwaiter().GetResult()
+            Error = $errorTask.GetAwaiter().GetResult()
+        }
+    } finally {
+        if ($process) { $process.Dispose() }
+    }
+}
+
 function Add-Result([string]$Name, [string]$Status, [string]$Details = '') {
     $script:Results.Add([pscustomobject]@{ Name = $Name; Status = $Status; Details = $Details }) | Out-Null
     $line = "[$Status] $Name"
@@ -52,13 +92,17 @@ function Quote-Remote([string]$Value) {
 }
 
 function Invoke-Remote($Session, [string]$Command) {
-    $null = & ssh @($Session.SshArgs) $Session.Target $Command 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "$($Session.Label): ssh command failed ($LASTEXITCODE)" }
+    $result = Invoke-ExternalProcess 'ssh.exe' (@($Session.SshArgs) + @($Session.Target, $Command))
+    if ($result.ExitCode -ne 0) {
+        throw "$($Session.Label): SSH command failed ($($result.ExitCode))."
+    }
 }
 
 function Copy-LocalFileToRemote($Session, [string]$Source, [string]$Destination) {
-    $null = & scp @($Session.ScpArgs) -- $Source "$($Session.Target):$Destination" 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "$($Session.Label): fixture copy failed ($LASTEXITCODE)" }
+    $result = Invoke-ExternalProcess 'scp.exe' (@($Session.ScpArgs) + @('--', $Source, "$($Session.Target):$Destination"))
+    if ($result.ExitCode -ne 0) {
+        throw "$($Session.Label): fixture copy failed ($($result.ExitCode))."
+    }
 }
 
 function Expand-PayloadOnUnixRemote($Session, [string]$Archive, [string]$Destination) {
@@ -81,14 +125,16 @@ function ConvertTo-PowerShellEncodedCommand([string]$Script) {
 
 function Invoke-WindowsRemote($Session, [string]$Script) {
     $command = 'powershell.exe -NoProfile -NonInteractive -EncodedCommand ' + (ConvertTo-PowerShellEncodedCommand $Script)
-    $output = & ssh @($Session.SshArgs) $Session.Target $command 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "$($Session.Label): Windows SSH command failed ($LASTEXITCODE)" }
-    return @($output)
+    $result = Invoke-ExternalProcess 'ssh.exe' (@($Session.SshArgs) + @($Session.Target, $command))
+    if ($result.ExitCode -ne 0) {
+        throw "$($Session.Label): Windows SSH command failed ($($result.ExitCode))."
+    }
+    return @($result.Output -split "`r?`n" | Where-Object { $_ })
 }
 
 function Test-RemotePath($Session, [string]$Path) {
-    & ssh @($Session.SshArgs) $Session.Target "test -e $(Quote-Remote $Path)" 2>$null
-    return $LASTEXITCODE -eq 0
+    $result = Invoke-ExternalProcess 'ssh.exe' (@($Session.SshArgs) + @($Session.Target, "test -e $(Quote-Remote $Path)"))
+    return $result.ExitCode -eq 0
 }
 
 function New-SelectedList([string]$Name, [string]$SelectedPath) {
@@ -106,12 +152,16 @@ function Invoke-Router([string]$Operation, [string]$Source, [string]$Target, [st
     $info.RedirectStandardError = $true
     foreach ($argument in @('selftest-operation', $Operation, $Source, $Target, $list, $errorFile)) { [void]$info.ArgumentList.Add($argument) }
     $process = [System.Diagnostics.Process]::Start($info)
-    $process.WaitForExit()
-    $standardError = $process.StandardError.ReadToEnd()
+    $standardErrorTask = $process.StandardError.ReadToEndAsync()
+    if (-not $process.WaitForExit($script:ExternalProcessTimeoutMs)) {
+        Stop-TestProcess $process
+        throw "router $Operation timed out after $($script:ExternalProcessTimeoutMs / 1000) seconds."
+    }
+    $standardError = $standardErrorTask.GetAwaiter().GetResult()
     if ($process.ExitCode -ne 0) {
         $error = if (Test-Path -LiteralPath $errorFile) { Get-Content -LiteralPath $errorFile -Raw } else { '' }
         if (-not $error) { $error = $standardError }
-        throw "router $Operation failed: $($error.Trim())"
+        throw "router $Operation failed."
     }
 }
 
@@ -123,12 +173,16 @@ function Invoke-RouterUnpack([string]$Archive, [string]$Target, [string]$Name) {
     $info.RedirectStandardError = $true
     foreach ($argument in @('selftest-unpack-local', $Archive, $Target, $errorFile)) { [void]$info.ArgumentList.Add($argument) }
     $process = [System.Diagnostics.Process]::Start($info)
-    $process.WaitForExit()
-    $standardError = $process.StandardError.ReadToEnd()
+    $standardErrorTask = $process.StandardError.ReadToEndAsync()
+    if (-not $process.WaitForExit($script:ExternalProcessTimeoutMs)) {
+        Stop-TestProcess $process
+        throw "router local unpack timed out after $($script:ExternalProcessTimeoutMs / 1000) seconds."
+    }
+    $standardError = $standardErrorTask.GetAwaiter().GetResult()
     if ($process.ExitCode -ne 0) {
         $error = if (Test-Path -LiteralPath $errorFile) { Get-Content -LiteralPath $errorFile -Raw } else { '' }
         if (-not $error) { $error = $standardError }
-        throw "router local unpack failed: $($error.Trim())"
+        throw 'router local unpack failed.'
     }
 }
 
@@ -143,15 +197,28 @@ function Assert-RouterFails([string]$Operation, [string]$Source, [string]$Target
 
 function Wait-ForSession([string]$Path, [int]$Index) {
     $errorFile = Join-Path $script:WorkRoot "session-$Index.err"
+    $standardError = ''
     $deadline = [DateTime]::UtcNow.AddSeconds(60)
     do {
         Remove-Item -LiteralPath $errorFile -Force -ErrorAction SilentlyContinue
-        $process = Start-Process -FilePath $script:Router -ArgumentList @('selftest-session', $Path, $errorFile) -Wait -PassThru
+        $sessionInfo = [System.Diagnostics.ProcessStartInfo]::new()
+        $sessionInfo.FileName = $script:Router
+        $sessionInfo.UseShellExecute = $false
+        $sessionInfo.RedirectStandardError = $true
+        foreach ($argument in @('selftest-session', $Path, $errorFile)) { [void]$sessionInfo.ArgumentList.Add($argument) }
+        $process = [System.Diagnostics.Process]::Start($sessionInfo)
+        $standardErrorTask = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($script:ExternalProcessTimeoutMs)) {
+            Stop-TestProcess $process
+            throw "Remote WFX session #$Index probe timed out after $($script:ExternalProcessTimeoutMs / 1000) seconds."
+        }
+        $standardError = $standardErrorTask.GetAwaiter().GetResult()
         if ($process.ExitCode -eq 0) { return }
         Start-Sleep -Milliseconds 750
     } while ([DateTime]::UtcNow -lt $deadline)
     $error = if (Test-Path -LiteralPath $errorFile) { Get-Content -LiteralPath $errorFile -Raw } else { '' }
-    throw "Remote WFX session #$Index did not become active: $($error.Trim())"
+    if (-not $error) { $error = $standardError }
+    throw "Remote WFX session #$Index did not become active."
 }
 
 function Invoke-RouterPrewarm([string]$Path, [string]$Name) {
@@ -162,12 +229,16 @@ function Invoke-RouterPrewarm([string]$Path, [string]$Name) {
     $info.RedirectStandardError = $true
     foreach ($argument in @('selftest-prewarm', $Path, $errorFile)) { [void]$info.ArgumentList.Add($argument) }
     $process = [System.Diagnostics.Process]::Start($info)
-    $process.WaitForExit()
-    $standardError = $process.StandardError.ReadToEnd()
+    $standardErrorTask = $process.StandardError.ReadToEndAsync()
+    if (-not $process.WaitForExit($script:ExternalProcessTimeoutMs)) {
+        Stop-TestProcess $process
+        throw "router prewarm timed out after $($script:ExternalProcessTimeoutMs / 1000) seconds."
+    }
+    $standardError = $standardErrorTask.GetAwaiter().GetResult()
     if ($process.ExitCode -ne 0) {
         $error = if (Test-Path -LiteralPath $errorFile) { Get-Content -LiteralPath $errorFile -Raw } else { '' }
         if (-not $error) { $error = $standardError }
-        throw "router prewarm failed: $($error.Trim())"
+        throw 'router prewarm failed.'
     }
 }
 
@@ -177,6 +248,18 @@ function Start-TotalCommanderSessions([string]$Executable, [string]$LeftPath, [s
     $info.UseShellExecute = $false
     foreach ($argument in @('/O', "/L=$LeftPath", "/R=$RightPath")) { [void]$info.ArgumentList.Add($argument) }
     [System.Diagnostics.Process]::Start($info).Dispose()
+}
+
+function Close-TestTotalCommander([string]$Executable) {
+    $fullPath = [System.IO.Path]::GetFullPath($Executable)
+    $processes = @(Get-Process TOTALCMD64 -ErrorAction SilentlyContinue | Where-Object {
+        try { $_.MainModule.FileName -eq $fullPath } catch { $false }
+    })
+    if ($processes.Count -eq 0) { return }
+    Start-Process -FilePath $fullPath -ArgumentList @('/O', '/L=C:\', '/R=C:\') -Wait
+    Start-Sleep -Milliseconds 500
+    $processes | ForEach-Object { [void]$_.CloseMainWindow() }
+    $processes | Wait-Process -Timeout 15 -ErrorAction SilentlyContinue
 }
 
 function Activate-RemoteSessions([string]$Executable, [string]$LeftPath, [int]$LeftIndex, [string]$RightPath, [int]$RightIndex) {
@@ -196,8 +279,13 @@ function Activate-RemoteSessions([string]$Executable, [string]$LeftPath, [int]$L
 function Remove-UncArtifacts([string[]]$Distros, [string]$RunId) {
     $wsl = Get-Command wsl.exe -ErrorAction SilentlyContinue
     if (-not $wsl) { return }
-    foreach ($distro in $Distros) {
-        try { & $wsl.Source -d $distro -- rm -rf "/tmp/SftpArchiveSmoke-$RunId" 2>$null } catch {}
+    for ($index = 0; $index -lt $Distros.Count; ++$index) {
+        $distro = $Distros[$index]
+        Write-Host "[INFO] Removing WSL UNC artifacts for target #$($index + 1)"
+        try {
+            $result = Invoke-ExternalProcess $wsl.Source @('-d', $distro, '--', 'rm', '-rf', "/tmp/SftpArchiveSmoke-$RunId")
+            if ($result.ExitCode -ne 0) { Write-Host "[WARN] WSL cleanup returned exit code $($result.ExitCode)" }
+        } catch { Write-Host '[WARN] WSL cleanup failed' }
     }
 }
 
@@ -222,8 +310,8 @@ function Assert-WindowsRemoteFile($Session, [string]$Path) {
 function Test-WindowsRemotePath($Session, [string]$Path) {
     $literal = $Path.Replace("'", "''")
     $command = 'powershell.exe -NoProfile -NonInteractive -EncodedCommand ' + (ConvertTo-PowerShellEncodedCommand "if (Test-Path -LiteralPath '$literal') { exit 0 }; exit 1")
-    $null = & ssh @($Session.SshArgs) $Session.Target $command 2>&1
-    return $LASTEXITCODE -eq 0
+    $result = Invoke-ExternalProcess 'ssh.exe' (@($Session.SshArgs) + @($Session.Target, $command))
+    return $result.ExitCode -eq 0
 }
 
 function Assert-WindowsRemoteTarEntry($Session, [string]$Path, [string]$Entry) {
@@ -238,6 +326,7 @@ function Assert-WindowsNoArchiveTemps($Session, [string]$Path) {
 }
 
 function Run-Case([string]$Name, [scriptblock]$Action) {
+    Write-Host "[INFO] Starting $Name"
     try { & $Action; Add-Result $Name 'PASS' } catch { Add-Result $Name 'FAIL' $_.Exception.Message }
 }
 
@@ -600,14 +689,25 @@ try {
         if (Test-WindowsRemotePath $windowsRemote "$windowsRoot\delete\tree") { throw 'Windows remote tree was not deleted' }
     }
 } finally {
-    if (Get-Variable remote -Scope Script -ErrorAction SilentlyContinue) { foreach ($session in $remote) { try { Invoke-Remote $session "rm -rf /tmp/sftpplug-archive-smoke-$script:RunId" } catch {} } }
+    if (Get-Variable tc -Scope Script -ErrorAction SilentlyContinue -ValueOnly) {
+        Write-Host '[INFO] Closing test Total Commander instance'
+        try { Close-TestTotalCommander $tc } catch { Write-Host '[WARN] Test Total Commander cleanup failed.' }
+    }
+    if (Get-Variable remote -Scope Script -ErrorAction SilentlyContinue) {
+        foreach ($session in $remote) {
+            Write-Host "[INFO] Removing $($session.Label) artifacts"
+            try { Invoke-Remote $session "rm -rf /tmp/sftpplug-archive-smoke-$script:RunId" } catch { Write-Host "[WARN] $($session.Label) cleanup failed" }
+        }
+    }
     if (Get-Variable windowsRemote -Scope Script -ErrorAction SilentlyContinue -ValueOnly) {
+        Write-Host '[INFO] Removing Windows remote artifacts'
         try {
             $cleanupRoot = $windowsRoot.Replace("'", "''")
             Invoke-WindowsRemote $windowsRemote "Remove-Item -LiteralPath '$cleanupRoot' -Recurse -Force -ErrorAction SilentlyContinue"
-        } catch {}
+        } catch { Write-Host '[WARN] Windows remote cleanup failed' }
     }
     if (-not $KeepArtifacts) {
+        Write-Host '[INFO] Removing local artifacts'
         Remove-UncArtifacts $WslDistros $script:RunId
         Remove-Item -LiteralPath $script:WorkRoot -Recurse -Force -ErrorAction SilentlyContinue
     }

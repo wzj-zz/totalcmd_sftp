@@ -59,7 +59,7 @@ SftpArchiveRouter.exe init -y
 | `Alt+F12` | 将 SFTP 面板目录镜像到本地临时目录，并打开 Total Commander 本地 Synchronize Directories 窗口。 |
 | `Ctrl+P` | 管理当前 SFTP session 的 SSH Local、Remote 和 Dynamic SOCKS5 隧道。 |
 
-Router 会在每次 SFTP TAR 操作前弹出目标输入框。Pack 默认目标是生成的 `.tar` 文件名；copy、move 和 unpack 默认目标是目标目录。按 Enter 使用默认值，也可以编辑目标后继续。原生 `F5` 和 `F6` 不会被覆盖。TAR streaming 需要活动 SSH/SFTP session 和远端 `tar`；PHP Agent 和 LAN Pair 不支持该路径。`Alt+F6` 需要 `7z.exe` 在 `PATH` 中，或安装在 `C:\Program Files\7-Zip`。
+Router 会在每次 SFTP TAR 操作前弹出目标输入框。Pack 默认目标是生成的 `.tar` 文件名；copy、move 和 unpack 默认目标是目标目录。按 Enter 使用默认值，也可以编辑目标后继续。原生 `F5` 和 `F6` 不会被覆盖。TAR streaming 需要活动 SSH/SFTP session 和远端 `tar`；PHP Agent 和 LAN Pair 不支持该路径。部署包自带 `Alt+F6` 所需的 `7z.exe` 运行时；`PATH` 或 `C:\Program Files\7-Zip` 中的安装仅作为后备。
 
 ## SSH 隧道
 

@@ -7,6 +7,23 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+$script:RouterTimeoutMs = 60000
+$script:RemoteCommandTimeoutMs = 60000
+$script:EchoReadyTimeoutSeconds = 15
+
+function Stop-TestProcess([System.Diagnostics.Process]$Process) {
+    if (-not $Process) { return }
+    try {
+        if (-not $Process.HasExited) {
+            $Process.Kill($true)
+            $Process.WaitForExit(5000)
+        }
+    } catch [System.InvalidOperationException] {
+    } finally {
+        $Process.Dispose()
+    }
+}
+
 function Add-Result([string]$Name, [string]$Status, [string]$Details = '') {
     $script:Results.Add([pscustomobject]@{ Name = $Name; Status = $Status; Details = $Details }) | Out-Null
     $line = "[$Status] $Name"
@@ -15,7 +32,13 @@ function Add-Result([string]$Name, [string]$Status, [string]$Details = '') {
 }
 
 function Run-Case([string]$Name, [scriptblock]$Action) {
-    try { & $Action; Add-Result $Name 'PASS' } catch { Add-Result $Name 'FAIL' $_.Exception.Message }
+    Write-Host "[INFO] Starting $Name"
+    try {
+        & $Action
+        Add-Result $Name 'PASS'
+    } catch {
+        Add-Result $Name 'FAIL' $_.Exception.Message
+    }
 }
 
 function Read-IniFile([string]$Path) {
@@ -61,12 +84,31 @@ function Get-WindowsRemoteCommand([string]$Script) {
 }
 
 function Invoke-RemoteCommand($Session, [string]$Command) {
-    $output = & ssh.exe @($Session.SshArgs) $Session.Target $Command 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        $details = ($output | Out-String).Trim()
-        throw "$($Session.Label): remote command failed ($LASTEXITCODE)$(if ($details) { ": $details" } else { '.' })"
+    $info = [System.Diagnostics.ProcessStartInfo]::new()
+    $info.FileName = 'ssh.exe'
+    $info.UseShellExecute = $false
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    foreach ($argument in $Session.SshArgs) { [void]$info.ArgumentList.Add($argument) }
+    [void]$info.ArgumentList.Add($Session.Target)
+    [void]$info.ArgumentList.Add($Command)
+    $process = [System.Diagnostics.Process]::Start($info)
+    try {
+        $outputTask = $process.StandardOutput.ReadToEndAsync()
+        $errorTask = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($script:RemoteCommandTimeoutMs)) {
+            Stop-TestProcess $process
+            throw "$($Session.Label): remote command timed out after $($script:RemoteCommandTimeoutMs / 1000) seconds."
+        }
+        $output = $outputTask.GetAwaiter().GetResult()
+        $error = $errorTask.GetAwaiter().GetResult()
+        if ($process.ExitCode -ne 0) {
+            throw "$($Session.Label): remote command failed ($($process.ExitCode))."
+        }
+        return @($output -split "`r?`n" | Where-Object { $_ })
+    } finally {
+        if ($process) { $process.Dispose() }
     }
-    return @($output)
 }
 
 function Start-RemoteCommand($Session, [string]$Command) {
@@ -81,8 +123,12 @@ function Start-RemoteCommand($Session, [string]$Command) {
     for ($attempt = 1; $attempt -le 3; ++$attempt) {
         try {
             return [System.Diagnostics.Process]::Start($info)
-        } catch [System.ComponentModel.Win32Exception] {
-            if ($_.Exception.NativeErrorCode -ne 5 -or $attempt -eq 3) { throw }
+        } catch {
+            $exception = $_.Exception
+            while ($exception -and -not ($exception -is [System.ComponentModel.Win32Exception])) {
+                $exception = $exception.InnerException
+            }
+            if (-not $exception -or $exception.NativeErrorCode -ne 5 -or $attempt -eq 3) { throw }
             Start-Sleep -Milliseconds (250 * $attempt)
         }
     }
@@ -96,6 +142,18 @@ function Start-TotalCommanderSessions([string]$Executable, [string]$LeftPath, [s
     [System.Diagnostics.Process]::Start($info).Dispose()
 }
 
+function Close-TestTotalCommander([string]$Executable) {
+    $fullPath = [System.IO.Path]::GetFullPath($Executable)
+    $processes = @(Get-Process TOTALCMD64 -ErrorAction SilentlyContinue | Where-Object {
+        try { $_.MainModule.FileName -eq $fullPath } catch { $false }
+    })
+    if ($processes.Count -eq 0) { return }
+    Start-Process -FilePath $fullPath -ArgumentList @('/O', '/L=C:\', '/R=C:\') -Wait
+    Start-Sleep -Milliseconds 500
+    $processes | ForEach-Object { [void]$_.CloseMainWindow() }
+    $processes | Wait-Process -Timeout 15 -ErrorAction SilentlyContinue
+}
+
 function Invoke-RouterTunnel([string]$Action, [string]$Path, [string]$Argument, [string]$ResultName) {
     $resultPath = Join-Path $script:WorkRoot "$ResultName.result"
     $errorPath = Join-Path $script:WorkRoot "$ResultName.err"
@@ -106,11 +164,15 @@ function Invoke-RouterTunnel([string]$Action, [string]$Path, [string]$Argument, 
     $info.RedirectStandardError = $true
     foreach ($value in @('selftest-tunnel', $Action, $Path, $Argument, $resultPath, $errorPath)) { [void]$info.ArgumentList.Add($value) }
     $process = [System.Diagnostics.Process]::Start($info)
-    $process.WaitForExit()
-    $standardError = $process.StandardError.ReadToEnd()
+    $standardErrorTask = $process.StandardError.ReadToEndAsync()
+    if (-not $process.WaitForExit($script:RouterTimeoutMs)) {
+        Stop-TestProcess $process
+        throw "router tunnel $Action timed out after $($script:RouterTimeoutMs / 1000) seconds."
+    }
+    $standardError = $standardErrorTask.GetAwaiter().GetResult()
     if ($process.ExitCode -ne 0) {
         $error = if (Test-Path -LiteralPath $errorPath) { Get-Content -LiteralPath $errorPath -Raw } else { $standardError }
-        throw "router tunnel $Action failed: $($error.Trim())"
+        throw "router tunnel $Action failed."
     }
     if ($Action -eq 'status') { return [System.IO.File]::ReadAllText($resultPath) }
     return ''
@@ -128,14 +190,18 @@ function Wait-ForSession([string]$Path, [string]$Label) {
         $info.RedirectStandardError = $true
         foreach ($argument in @('selftest-session', $Path, $errorPath)) { [void]$info.ArgumentList.Add($argument) }
         $process = [System.Diagnostics.Process]::Start($info)
-        $process.WaitForExit()
-        $standardError = $process.StandardError.ReadToEnd()
+        $standardErrorTask = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($script:RouterTimeoutMs)) {
+            Stop-TestProcess $process
+            throw "$Label session probe timed out after $($script:RouterTimeoutMs / 1000) seconds."
+        }
+        $standardError = $standardErrorTask.GetAwaiter().GetResult()
         if ($process.ExitCode -eq 0) { return }
         Start-Sleep -Milliseconds 750
     } while ([DateTime]::UtcNow -lt $deadline)
     $error = if (Test-Path -LiteralPath $errorPath) { Get-Content -LiteralPath $errorPath -Raw } else { '' }
     if (-not $error) { $error = $standardError }
-    throw "$Label did not become active: $($error.Trim())"
+    throw "$Label did not become active."
 }
 
 function Get-AvailableLoopbackPort {
@@ -224,16 +290,18 @@ function Start-RemoteEchoServer($Session, [string]$Kind, [int]$Port) {
 }
 
 function Wait-ForRemoteEchoServer([System.Diagnostics.Process]$Process) {
-    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    $readTask = $Process.StandardOutput.ReadLineAsync()
+    $deadline = [DateTime]::UtcNow.AddSeconds($script:EchoReadyTimeoutSeconds)
     do {
-        if ($Process.HasExited) { throw "Remote echo server exited before becoming ready: $($Process.StandardError.ReadToEnd().Trim())" }
-        if ($Process.StandardOutput.Peek() -ge 0) {
-            if ($Process.StandardOutput.ReadLine() -eq 'READY') { return }
-            throw 'Remote echo server returned an invalid ready response.'
+        if ($Process.HasExited) { throw 'Remote echo server exited before becoming ready.' }
+        if ($readTask.IsCompleted) {
+            $line = $readTask.GetAwaiter().GetResult()
+            if ($line -eq 'READY') { return }
+            throw "Remote echo server returned an invalid ready response: $line"
         }
         Start-Sleep -Milliseconds 100
     } while ([DateTime]::UtcNow -lt $deadline)
-    throw 'Remote echo server did not become ready.'
+    throw "Remote echo server did not become ready within $script:EchoReadyTimeoutSeconds seconds."
 }
 
 function Start-RemoteEchoClient($Session, [string]$Kind, [int]$Port) {
@@ -247,13 +315,12 @@ function Start-RemoteEchoClient($Session, [string]$Kind, [int]$Port) {
 
 function Wait-RemoteEchoClient([System.Diagnostics.Process]$Process) {
     if (-not $Process.WaitForExit(30000)) {
-        $Process.Kill($true)
-        $Process.WaitForExit()
+        Stop-TestProcess $Process
         throw 'Remote reverse-tunnel client timed out.'
     }
     $output = $Process.StandardOutput.ReadToEnd().Trim()
-    $error = $Process.StandardError.ReadToEnd().Trim()
-    if ($Process.ExitCode -ne 0) { throw "Remote reverse-tunnel client failed ($($Process.ExitCode))$(if ($error) { ": $error" } else { '' })" }
+    $null = $Process.StandardError.ReadToEnd()
+    if ($Process.ExitCode -ne 0) { throw "Remote reverse-tunnel client failed ($($Process.ExitCode))." }
     if ($output -ne 'TUNNEL:tunnel-smoke') { throw 'Remote reverse-tunnel client did not receive the echo response.' }
 }
 
@@ -314,6 +381,7 @@ function Assert-TunnelRulesRestored($Profile) {
 
 function Test-TunnelProfile($Profile) {
     $path = $Profile.SftpPath
+    Write-Host "[INFO] Snapshotting $($Profile.Label) tunnel rules"
     $Profile.OriginalRules = @(
         Get-TunnelRules (Invoke-RouterTunnel status $path '-' "$($Profile.Label)-initial")
     )
@@ -334,8 +402,7 @@ function Test-TunnelProfile($Profile) {
             Assert-TunnelStatus $path $false "$($Profile.Label)-local-disabled"
             if (-not (Test-TcpPortClosed $localPort)) { throw 'Local forwarding listener remained reachable after disabling it.' }
         } finally {
-            if ($remoteServer -and -not $remoteServer.HasExited) { $remoteServer.Kill($true); $remoteServer.WaitForExit() }
-            if ($remoteServer) { $remoteServer.Dispose() }
+            Stop-TestProcess $remoteServer
         }
         }
 
@@ -353,8 +420,7 @@ function Test-TunnelProfile($Profile) {
             Assert-TunnelStatus $path $false "$($Profile.Label)-dynamic-disabled"
             if (-not (Test-TcpPortClosed $localPort)) { throw 'Dynamic SOCKS5 listener remained reachable after disabling it.' }
         } finally {
-            if ($remoteServer -and -not $remoteServer.HasExited) { $remoteServer.Kill($true); $remoteServer.WaitForExit() }
-            if ($remoteServer) { $remoteServer.Dispose() }
+            Stop-TestProcess $remoteServer
         }
         }
 
@@ -373,15 +439,14 @@ function Test-TunnelProfile($Profile) {
             Invoke-RouterTunnel toggle $path '0|0' "$($Profile.Label)-remote-disable" | Out-Null
             Assert-TunnelStatus $path $false "$($Profile.Label)-remote-disabled"
         } finally {
-            if ($localServer -and -not $localServer.HasExited) { $localServer.Kill($true); $localServer.WaitForExit() }
-            if ($localServer) { $localServer.Dispose() }
-            if ($remoteClient -and -not $remoteClient.HasExited) { $remoteClient.Kill($true); $remoteClient.WaitForExit() }
-            if ($remoteClient) { $remoteClient.Dispose() }
+            Stop-TestProcess $localServer
+            Stop-TestProcess $remoteClient
         }
         }
     } finally {
         if ($Profile.RulesSnapshotTaken) {
             try {
+                Write-Host "[INFO] Restoring $($Profile.Label) tunnel rules"
                 Set-TunnelRules $path $Profile.OriginalRules "$($Profile.Label)-restore"
                 Assert-TunnelRulesRestored $Profile
             } catch {
@@ -434,13 +499,22 @@ try {
     Test-TunnelProfile $unix
     Test-TunnelProfile $windows
 } finally {
+    if (Get-Variable tc -Scope Script -ErrorAction SilentlyContinue -ValueOnly) {
+        Write-Host '[INFO] Closing test Total Commander instance'
+        try { Close-TestTotalCommander $tc } catch { Write-Host '[WARN] Test Total Commander cleanup failed.' }
+    }
     if ((Get-Variable unix -Scope Script -ErrorAction SilentlyContinue -ValueOnly) -and $unixRoot) {
-        try { Invoke-RemoteCommand $unix.Ssh ("rm -rf " + (Quote-Remote $unixRoot)) | Out-Null } catch {}
+        Write-Host '[INFO] Removing Unix remote artifacts'
+        try { Invoke-RemoteCommand $unix.Ssh ("rm -rf " + (Quote-Remote $unixRoot)) | Out-Null } catch { Write-Host '[WARN] Unix remote cleanup failed' }
     }
     if ((Get-Variable windows -Scope Script -ErrorAction SilentlyContinue -ValueOnly) -and $windowsRoot) {
-        try { Invoke-RemoteCommand $windows.Ssh (Get-WindowsRemoteCommand "Remove-Item -LiteralPath '$windowsRootLiteral' -Recurse -Force -ErrorAction SilentlyContinue") | Out-Null } catch {}
+        Write-Host '[INFO] Removing Windows remote artifacts'
+        try { Invoke-RemoteCommand $windows.Ssh (Get-WindowsRemoteCommand "Remove-Item -LiteralPath '$windowsRootLiteral' -Recurse -Force -ErrorAction SilentlyContinue") | Out-Null } catch { Write-Host '[WARN] Windows remote cleanup failed' }
     }
-    if (-not $KeepArtifacts) { Remove-Item -LiteralPath $script:WorkRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    if (-not $KeepArtifacts) {
+        Write-Host '[INFO] Removing local artifacts'
+        Remove-Item -LiteralPath $script:WorkRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 if (@($script:Results | Where-Object Status -eq 'FAIL').Count -gt 0) { exit 1 }

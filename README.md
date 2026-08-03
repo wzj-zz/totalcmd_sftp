@@ -45,7 +45,7 @@ Total Commander WFX API
 | `Alt+F12` | Mirror SFTP panel directories to temporary local folders and open TC's local Synchronize Directories view. |
 | `Ctrl+P` | Manage SSH Local (`-L`), Remote (`-R`), and Dynamic SOCKS5 (`-D`) tunnels for the active SFTP session. |
 
-The router shows a target input before each SFTP TAR operation. Pack operations default to the generated `.tar` filename; copy, move, and unpack default to the target directory. Press Enter to use the default or edit the target before continuing. Native `F5` and `F6` remain unchanged. TAR streaming requires an active SSH/SFTP session and remote `tar`; PHP Agent and LAN Pair connections are unsupported. `Alt+F6` requires `7z.exe` in `PATH` or `C:\Program Files\7-Zip`.
+The router shows a target input before each SFTP TAR operation. Pack operations default to the generated `.tar` filename; copy, move, and unpack default to the target directory. Press Enter to use the default or edit the target before continuing. Native `F5` and `F6` remain unchanged. TAR streaming requires an active SSH/SFTP session and remote `tar`; PHP Agent and LAN Pair connections are unsupported. The deployed plugin includes the `7z.exe` runtime used by `Alt+F6`; a `PATH` or `C:\Program Files\7-Zip` installation is only a fallback.
 
 ## SSH Tunnels
 

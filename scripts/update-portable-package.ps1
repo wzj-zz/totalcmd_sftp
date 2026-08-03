@@ -26,6 +26,51 @@ function Assert-ZipEntries([string]$Path, [string[]]$RequiredEntries) {
     }
 }
 
+function Copy-ZipEntry($Source, $Destination, [string]$Name) {
+    $entry = $Destination.CreateEntry($Name, [System.IO.Compression.CompressionLevel]::Optimal)
+    $entry.LastWriteTime = $Source.LastWriteTime
+    $entry.ExternalAttributes = $Source.ExternalAttributes
+    $input = $Source.Open()
+    $output = $entry.Open()
+    try { $input.CopyTo($output) } finally { $output.Dispose(); $input.Dispose() }
+}
+
+function Add-ZipDirectory([System.IO.Compression.ZipArchive]$Archive, [string]$Directory, [string]$Prefix) {
+    foreach ($file in Get-ChildItem -LiteralPath $Directory -File -Recurse -Force) {
+        $relative = [System.IO.Path]::GetRelativePath($Directory, $file.FullName).Replace('\', '/')
+        $entry = $Archive.CreateEntry("$Prefix/$relative", [System.IO.Compression.CompressionLevel]::Optimal)
+        $input = [System.IO.File]::OpenRead($file.FullName)
+        $output = $entry.Open()
+        try { $input.CopyTo($output) } finally { $output.Dispose(); $input.Dispose() }
+    }
+}
+
+function Replace-PortablePluginEntries([string]$SourceArchive, [string]$ReplacementArchive, [string]$ExtractionRoot, [string]$PortableRoot, [string]$PluginDirectory) {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $portablePrefix = ([System.IO.Path]::GetRelativePath($ExtractionRoot, $PortableRoot).Replace('\', '/').TrimEnd('/') + '/')
+    $pluginPrefix = "${portablePrefix}Plugins/Wfx/SFTP/"
+    $updatedFiles = @("${portablePrefix}Wincmd.ini", "${portablePrefix}usercmd.ini")
+    $source = [System.IO.Compression.ZipFile]::OpenRead($SourceArchive)
+    $destination = [System.IO.Compression.ZipFile]::Open($ReplacementArchive, [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+        foreach ($entry in $source.Entries) {
+            if ($entry.FullName.StartsWith($pluginPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or $updatedFiles -contains $entry.FullName) { continue }
+            Copy-ZipEntry $entry $destination $entry.FullName
+        }
+        Add-ZipDirectory $destination $PluginDirectory ($pluginPrefix.TrimEnd('/'))
+        foreach ($name in @('Wincmd.ini', 'usercmd.ini')) {
+            $file = Join-Path $PortableRoot $name
+            $entry = $destination.CreateEntry("${portablePrefix}$name", [System.IO.Compression.CompressionLevel]::Optimal)
+            $input = [System.IO.File]::OpenRead($file)
+            $output = $entry.Open()
+            try { $input.CopyTo($output) } finally { $output.Dispose(); $input.Dispose() }
+        }
+    } finally {
+        $destination.Dispose()
+        $source.Dispose()
+    }
+}
+
 function Find-PortableRoot([string]$ExtractionRoot) {
     $executables = @(Get-ChildItem -LiteralPath $ExtractionRoot -Filter 'Totalcmd64.exe' -File -Recurse)
     if ($executables.Count -ne 1) { throw "Expected exactly one Totalcmd64.exe in the archive, found $($executables.Count)." }
@@ -105,7 +150,7 @@ try {
     if ($init.ExitCode -ne 0) { throw "Router init -y failed with exit code $($init.ExitCode)." }
     Assert-InitializedPortableRoot $portableRoot
 
-    Compress-Archive -LiteralPath $portableRoot -DestinationPath $replacement -CompressionLevel Optimal -Force
+    Replace-PortablePluginEntries $ArchivePath $replacement $extractionRoot $portableRoot $pluginTarget
     $portableName = Split-Path -Leaf $portableRoot
     Assert-ZipEntries $replacement @(
         "$portableName/Totalcmd64.exe",
