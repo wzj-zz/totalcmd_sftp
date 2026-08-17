@@ -29,6 +29,10 @@ function Stop-TestProcess([System.Diagnostics.Process]$Process) {
         }
     } catch [System.InvalidOperationException] {
     } finally {
+        $tempFile = $Process.TempScriptFile
+        if ($tempFile -and (Test-Path -LiteralPath $tempFile)) {
+            Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue
+        }
         $Process.Dispose()
     }
 }
@@ -421,6 +425,8 @@ function Open-SocksHoldConnection([int]$Port, [int]$TargetPort) {
 
 function Start-LocalEchoServer([int]$Port) {
     $script = "`$listener=[Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback,$Port); `$listener.Start(); [Console]::WriteLine('READY'); try { `$client=`$listener.AcceptTcpClient(); try { `$stream=`$client.GetStream(); `$buffer=[byte[]]::new(64); `$count=`$stream.Read(`$buffer,0,`$buffer.Length); `$reply=[Text.Encoding]::ASCII.GetBytes('TUNNEL:' + [Text.Encoding]::ASCII.GetString(`$buffer,0,`$count)); `$stream.Write(`$reply,0,`$reply.Length) } finally { `$client.Dispose() } } finally { `$listener.Stop() }"
+    $tempFile = Join-Path $script:WorkRoot "EchoServer_$Port.ps1"
+    [System.IO.File]::WriteAllText($tempFile, $script, [Text.Encoding]::ASCII)
     $info = [System.Diagnostics.ProcessStartInfo]::new()
     $info.FileName = (Get-Process -Id $PID).Path
     $info.UseShellExecute = $false
@@ -428,9 +434,11 @@ function Start-LocalEchoServer([int]$Port) {
     $info.RedirectStandardError = $true
     [void]$info.ArgumentList.Add('-NoProfile')
     [void]$info.ArgumentList.Add('-NonInteractive')
-    [void]$info.ArgumentList.Add('-EncodedCommand')
-    [void]$info.ArgumentList.Add((ConvertTo-PowerShellEncodedCommand $script))
-    return Start-ProcessWithAccessRetry $info
+    [void]$info.ArgumentList.Add('-File')
+    [void]$info.ArgumentList.Add($tempFile)
+    $process = Start-ProcessWithAccessRetry $info
+    $process | Add-Member -MemberType NoteProperty -Name TempScriptFile -Value $tempFile -Force
+    return $process
 }
 
 function Write-TunnelRules([string[]]$Rules, [string]$Name) {
