@@ -109,7 +109,7 @@ IPv6 地址需要加方括号，例如 `[::1]`。
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\tunnel-smoke.ps1 -TotalCommanderPath '<Total Commander>' -UnixSession 'vps' -WindowsSession 'win@'
 ```
 
-该测试会打开两个 WFX session，临时替换每个 profile 的规则，并用真实 TCP echo 流量验证 `-L`、`-D` 和 `-R`。覆盖 manager Toggle、Enabled/Disabled 重连持久化、启动失败与重试、活动 relay 关闭、多规则独立性，以及 Disable 后本地和远端 listener 确实关闭。原规则会在 `finally` 中恢复。Unix 远端需要 Python 3，Windows OpenSSH 远端需要 PowerShell。
+该测试会打开两个 WFX session，临时替换每个 profile 的规则，并用真实 TCP echo 流量验证 `-L`、`-D` 和 `-R`。每个选中的 profile 还会通过本机 `curl.exe` 经由 `-D` SOCKS5 listener 连续发起八次公网 HTTPS 请求，并在每次请求后检查 Total Commander 仍然存活。覆盖 manager Toggle、Enabled/Disabled 重连持久化、启动失败与重试、活动 relay 关闭、多规则独立性，以及 Disable 后本地和远端 listener 确实关闭。原规则会在 `finally` 中恢复。需要本机 `curl.exe`、Unix 远端 Python 3、Windows OpenSSH 远端 PowerShell，以及公网 HTTPS 可达；必要时可用 `-PublicSocksUrl '<url>'` 替换测试 endpoint。
 
 `0.0.0.0` 表示监听所有网卡，允许其它设备通过这台机器的 IP 访问；只想允许本机访问时应使用 `127.0.0.1`。Remote listener 是否允许 `0.0.0.0` 还取决于 SSH 服务器配置，例如 `GatewayPorts`。
 

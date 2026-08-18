@@ -2,6 +2,7 @@ param(
     [Parameter(Mandatory)] [string]$TotalCommanderPath,
     [Parameter(Mandatory)] [string]$UnixSession,
     [Parameter(Mandatory)] [string]$WindowsSession,
+    [string]$PublicSocksUrl = 'https://www.httpbin.org/ip',
     [switch]$KeepArtifacts
 )
 
@@ -318,6 +319,41 @@ function Invoke-TcpEcho([int]$Port, [int]$TargetPort, [switch]$Socks) {
     }
 }
 
+function Assert-TargetTotalCommanderRunning {
+    $processes = @(Get-Process TOTALCMD64 -ErrorAction SilentlyContinue | Where-Object {
+        try { $_.MainModule.FileName -eq $script:TotalCommanderExecutable } catch { $false }
+    })
+    if (-not $processes) { throw 'Target Total Commander exited during the SOCKS5 regression test.' }
+}
+
+function Invoke-PublicSocksRequest([int]$Port, [string]$Url) {
+    $info = [System.Diagnostics.ProcessStartInfo]::new()
+    $info.FileName = 'curl.exe'
+    $info.UseShellExecute = $false
+    $info.RedirectStandardError = $true
+    foreach ($argument in @(
+        '--noproxy', '',
+        '--proxy', "socks5://127.0.0.1:$Port",
+        '--connect-timeout', '10',
+        '--max-time', '30',
+        '--fail', '--silent', '--show-error',
+        '--output', 'NUL',
+        $Url
+    )) { [void]$info.ArgumentList.Add($argument) }
+    $process = Start-ProcessWithAccessRetry $info
+    try {
+        $errorTask = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit(35000)) {
+            Stop-TestProcess $process
+            throw 'Public HTTPS SOCKS5 request timed out.'
+        }
+        $null = $errorTask.GetAwaiter().GetResult()
+        if ($process.ExitCode -ne 0) { throw 'Public HTTPS SOCKS5 request failed.' }
+    } finally {
+        if ($process) { $process.Dispose() }
+    }
+}
+
 function Test-TcpPortClosed([int]$Port) {
     $client = [System.Net.Sockets.TcpClient]::new()
     try {
@@ -529,20 +565,46 @@ function Test-TunnelProfile($Profile) {
         }
 
         Run-Case "$($Profile.Label) dynamic SOCKS5 forwarding (-D)" {
-        $remotePort = Get-AvailableRemoteLoopbackPort $Profile.Ssh $Profile.Kind
         $localPort = Get-AvailableLoopbackPort
-        $remoteServer = Start-RemoteEchoServer $Profile.Ssh $Profile.Kind $remotePort
+        $remoteServer = $null
         try {
-            Wait-ForRemoteEchoServer $remoteServer
             Set-TunnelRules $path @("- -D 127.0.0.1:${localPort}") "$($Profile.Label)-dynamic"
             Invoke-RouterTunnel toggle $path '0|1' "$($Profile.Label)-dynamic-enable" | Out-Null
             Assert-TunnelStatus $path $true 'running' "$($Profile.Label)-dynamic-enabled"
-            Invoke-TcpEcho $localPort $remotePort -Socks
+            for ($attempt = 1; $attempt -le 8; ++$attempt) {
+                $remotePort = Get-AvailableRemoteLoopbackPort $Profile.Ssh $Profile.Kind
+                $remoteServer = Start-RemoteEchoServer $Profile.Ssh $Profile.Kind $remotePort
+                try {
+                    Wait-ForRemoteEchoServer $remoteServer
+                    Invoke-TcpEcho $localPort $remotePort -Socks
+                } finally {
+                    Stop-TestProcess $remoteServer
+                    $remoteServer = $null
+                }
+            }
             Invoke-RouterTunnel toggle $path '0|0' "$($Profile.Label)-dynamic-disable" | Out-Null
             Assert-TunnelStatus $path $false 'stopped' "$($Profile.Label)-dynamic-disabled"
             if (-not (Test-TcpPortClosed $localPort)) { throw 'Dynamic SOCKS5 listener remained reachable after disabling it.' }
         } finally {
             Stop-TestProcess $remoteServer
+        }
+        }
+
+        Run-Case "$($Profile.Label) public HTTPS SOCKS5 forwarding (-D)" {
+        $localPort = Get-AvailableLoopbackPort
+        try {
+            Set-TunnelRules $path @("- -D 127.0.0.1:${localPort}") "$($Profile.Label)-public-dynamic"
+            Invoke-RouterTunnel toggle $path '0|1' "$($Profile.Label)-public-dynamic-enable" | Out-Null
+            Assert-TunnelStatus $path $true 'running' "$($Profile.Label)-public-dynamic-enabled"
+            for ($attempt = 1; $attempt -le 8; ++$attempt) {
+                Invoke-PublicSocksRequest $localPort $PublicSocksUrl
+                Assert-TargetTotalCommanderRunning
+            }
+            Invoke-RouterTunnel toggle $path '0|0' "$($Profile.Label)-public-dynamic-disable" | Out-Null
+            Assert-TunnelStatus $path $false 'stopped' "$($Profile.Label)-public-dynamic-disabled"
+            if (-not (Test-TcpPortClosed $localPort)) { throw 'Public HTTPS SOCKS5 listener remained reachable after disabling it.' }
+        } finally {
+            try { Invoke-RouterTunnel toggle $path '0|0' "$($Profile.Label)-public-dynamic-cleanup" | Out-Null } catch {}
         }
         }
 
@@ -767,6 +829,7 @@ try {
     $windows.TcPath = "\\\SFTP\$WindowsSession\$windowsRoot"
 
     $tc = Join-Path $TotalCommanderPath 'TOTALCMD64.EXE'
+    $script:TotalCommanderExecutable = [System.IO.Path]::GetFullPath($tc)
     Start-TotalCommanderSessions $tc $unix.TcPath $windows.TcPath
     Wait-ForSession $unix.SftpPath 'Unix remote'
     Wait-ForSession $windows.SftpPath 'Windows remote'

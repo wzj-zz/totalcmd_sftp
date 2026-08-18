@@ -20,6 +20,8 @@ namespace {
 
 constexpr int kTunnelBacklog = 16;
 constexpr DWORD kTunnelPollMs = 100;
+constexpr DWORD kSocksHandshakeTimeoutMs = 10000;
+constexpr DWORD kDirectTcpipTimeoutMs = 30000;
 constexpr DWORD kRemoteForwardRetryMs = 3000;
 constexpr DWORD kTunnelStopTimeoutMs = 3000;
 
@@ -227,6 +229,26 @@ void SetTunnelSocketTimeouts(SOCKET socket)
     setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
 }
 
+void SetSocksHandshakeTimeouts(SOCKET socket)
+{
+    const DWORD timeout = kSocksHandshakeTimeoutMs;
+    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+    setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+}
+
+void FreeRelayChannel(pConnectSettings session, std::unique_ptr<ISshChannel>& channel) noexcept
+{
+    if (!channel)
+        return;
+
+    // channelFree() owns the EOF/close sequence for a direct-tcpip channel.
+    // Drain that single state machine while holding the session lease instead
+    // of advancing it separately through sendEof/channelClose first.
+    ScopedSshSessionUse use(session);
+    WaitForOperation([&] { return channel->channelFree(); }, 2000, session);
+    channel.reset();
+}
+
 void Relay(pConnectSettings session, SOCKET local, std::unique_ptr<ISshChannel> channel, std::atomic<bool>& stop,
            std::mutex& socketMutex, std::vector<SOCKET>& sockets)
 {
@@ -275,27 +297,25 @@ done:
             sockets.erase(found);
     }
     CloseSocket(local);
-    // Channel destruction sends SSH close packets, so it must use the same
-    // serialization as every other libssh2 call on this shared session.
-    ScopedSshSessionUse use(session);
-    channel.reset();
+    FreeRelayChannel(session, channel);
 }
 
 std::unique_ptr<ISshChannel> OpenDirectTcpip(pConnectSettings session, const std::string& host,
-                                             unsigned short port)
+                                              unsigned short port)
 {
+    // libssh2 retains incomplete direct-tcpip state on the session after
+    // EAGAIN. Keep the lease until that same request is resumed or abandoned.
+    ScopedSshSessionUse use(session);
+    const SYSTICKS start = get_sys_ticks();
     for (;;) {
-        std::unique_ptr<ISshChannel> channel;
-        int error = 0;
-        {
-            ScopedSshSessionUse use(session);
-            channel = session->session->directTcpip(host.c_str(), port, "127.0.0.1", 0);
-            error = channel ? 0 : session->session->lastErrno();
-        }
+        std::unique_ptr<ISshChannel> channel = session->session->directTcpip(host.c_str(), port, "127.0.0.1", 0);
+        const int error = channel ? 0 : session->session->lastErrno();
         if (channel || error != LIBSSH2_ERROR_EAGAIN)
             return channel;
-        if (!WaitForSshIo(session, kTunnelPollMs))
+        if (get_ticks_between(start) >= kDirectTcpipTimeoutMs)
             return {};
+        if (!WaitForSshIo(session, kTunnelPollMs))
+            continue;
     }
 }
 
@@ -473,16 +493,17 @@ bool SshTunnelManager::StartTunnel(Tunnel& tunnel, std::string& error)
                 SOCKET local = accept(tunnel.localListener, nullptr, nullptr);
                 if (local == INVALID_SOCKET)
                     continue;
-                SetTunnelSocketTimeouts(local);
                 std::string host = tunnel.rule.targetHost;
                 unsigned short port = tunnel.rule.targetPort;
                 if (tunnel.rule.type == SshTunnelType::dynamic) {
+                    SetSocksHandshakeTimeouts(local);
                     if (!SocksConnect(local, host, port)) {
                         SendSocksReply(local, 1);
                         CloseSocket(local);
                         continue;
                     }
                 }
+                SetTunnelSocketTimeouts(local);
                 std::unique_ptr<ISshChannel> channel;
                 channel = OpenDirectTcpip(session_, host, port);
                 if (!channel) {
